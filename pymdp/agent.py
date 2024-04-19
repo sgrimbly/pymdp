@@ -151,7 +151,7 @@ class Agent(object):
             for m in range(self.num_modalities):
                 factor_dims = tuple([self.num_states[f] for f in self.A_factor_list[m]])
                 assert self.A[m].shape[1:] == factor_dims, f"Please input an `A_factor_list` whose {m}-th indices pick out the hidden state factors that line up with lagging dimensions of A{m}..." 
-                if self.pA != None:
+                if self.pA is not None:
                     assert self.pA[m].shape[1:] == factor_dims, f"Please input an `A_factor_list` whose {m}-th indices pick out the hidden state factors that line up with lagging dimensions of pA{m}..." 
         else:
             self.factorized = True
@@ -159,7 +159,7 @@ class Agent(object):
                 assert max(A_factor_list[m]) <= (self.num_factors - 1), f"Check modality {m} of A_factor_list - must be consistent with `num_states` and `num_factors`..."
                 factor_dims = tuple([self.num_states[f] for f in A_factor_list[m]])
                 assert self.A[m].shape[1:] == factor_dims, f"Check modality {m} of A_factor_list. It must coincide with lagging dimensions of A{m}..." 
-                if self.pA != None:
+                if self.pA is not None:
                     assert self.pA[m].shape[1:] == factor_dims, f"Check modality {m} of A_factor_list. It must coincide with lagging dimensions of pA{m}..."
             self.A_factor_list = A_factor_list
 
@@ -179,7 +179,7 @@ class Agent(object):
             for f in range(self.num_factors):
                 factor_dims = tuple([self.num_states[f] for f in self.B_factor_list[f]])
                 assert self.B[f].shape[1:-1] == factor_dims, f"Please input a `B_factor_list` whose {f}-th indices pick out the hidden state factors that line up with the all-but-final lagging dimensions of B{f}..." 
-                if self.pB != None:
+                if self.pA is not None and self.pB is not None:
                     assert self.pB[f].shape[1:-1] == factor_dims, f"Please input a `B_factor_list` whose {f}-th indices pick out the hidden state factors that line up with the all-but-final lagging dimensions of pB{f}..." 
         else:
             self.factorized = True
@@ -187,7 +187,7 @@ class Agent(object):
                 assert max(B_factor_list[f]) <= (self.num_factors - 1), f"Check factor {f} of B_factor_list - must be consistent with `num_states` and `num_factors`..."
                 factor_dims = tuple([self.num_states[f] for f in B_factor_list[f]])
                 assert self.B[f].shape[1:-1] == factor_dims, f"Check factor {f} of B_factor_list. It must coincide with all-but-final lagging dimensions of B{f}..." 
-                if self.pB != None:
+                if self.pA is not None and self.pB is not None:
                     assert self.pB[f].shape[1:-1] == factor_dims, f"Check factor {f} of B_factor_list. It must coincide with all-but-final lagging dimensions of pB{f}..."
             self.B_factor_list = B_factor_list
 
@@ -385,10 +385,10 @@ class Agent(object):
         else:
             self.qs = init_qs
         
-        if self.pA != None:
+        if self.pA is not None:
             self.A = utils.norm_dist_obj_arr(self.pA)
         
-        if self.pB != None:
+        if self.pB is not None:
             self.B = utils.norm_dist_obj_arr(self.pB)
 
         return self.qs
