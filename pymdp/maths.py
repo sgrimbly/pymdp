@@ -250,6 +250,23 @@ def get_joint_likelihood_seq(A, obs, num_states):
         ll_seq[t] = get_joint_likelihood(A, obs_t, num_states)
     return ll_seq
 
+def get_joint_likelihood_seq_by_modality(A, obs, num_states):
+    """
+    Returns joint likelihoods for each modality separately
+    """
+
+    ll_seq = utils.obj_array(len(obs))
+    n_modalities = len(A)
+
+    for t, obs_t in enumerate(obs):
+        likelihood = utils.obj_array(n_modalities)
+        obs_t_obj = utils.to_obj_array(obs_t)
+        for (m, A_m) in enumerate(A):
+            likelihood[m] = dot_likelihood(A_m, obs_t_obj[m])
+        ll_seq[t] = likelihood
+    
+    return ll_seq
+
 
 def spm_norm(A):
     """ 
@@ -535,3 +552,37 @@ def spm_MDP_G(A, x):
 
     return G
 
+def kl_div(P,Q):
+    """
+    Parameters
+    ----------
+    P : Categorical probability distribution
+    Q : Categorical probability distribution
+
+    Returns
+    -------
+    The KL-divergence of P and Q
+
+    """
+    dkl = 0
+    for i in range(len(P)):
+        dkl += np.dot(P[i], np.log(P[i] + EPS_VAL) - np.log(Q[i] + EPS_VAL))
+    return(dkl)
+
+def entropy(A):
+    """
+    Compute the entropy term H of the likelihood matrix,
+    i.e. one entropy value per column
+    """
+    entropies = np.empty(len(A), dtype=object)
+    for i in range(len(A)):
+        if len(A[i].shape) > 2:
+            obs_dim = A[i].shape[0]
+            s_dim = A[i].size // obs_dim
+            A_merged = A[i].reshape(obs_dim, s_dim)
+        else:
+            A_merged = A[i]
+
+        H = - np.diag(np.matmul(A_merged.T, np.log(A_merged + EPS_VAL)))
+        entropies[i] = H.reshape(*A[i].shape[1:])
+    return entropies

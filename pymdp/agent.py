@@ -36,10 +36,11 @@ class Agent(object):
         B,
         C=None,
         D=None,
-        E = None,
+        E=None,
+        H=None,
         pA=None,
-        pB = None,
-        pD = None,
+        pB=None,
+        pD=None,
         num_controls=None,
         policy_len=1,
         inference_horizon=1,
@@ -59,11 +60,18 @@ class Agent(object):
         factors_to_learn="all",
         lr_pB=1.0,
         lr_pD=1.0,
-        use_BMA = True,
-        policy_sep_prior = False,
-        save_belief_hist = False,
-        A_factor_list = None,
-        B_factor_list = None
+        use_BMA=True,
+        policy_sep_prior=False,
+        save_belief_hist=False,
+        A_factor_list=None,
+        B_factor_list=None,
+        sophisticated=False,
+        si_horizon=3,
+        si_policy_prune_threshold=1/16,
+        si_state_prune_threshold=1/16,
+        si_prune_penalty=512,
+        ii_depth=10,
+        ii_threshold=1/16,
     ):
 
         ### Constant parameters ###
@@ -84,6 +92,15 @@ class Agent(object):
         self.factors_to_learn = factors_to_learn
         self.lr_pB = lr_pB
         self.lr_pD = lr_pD
+
+        # sophisticated inference parameters
+        self.sophisticated = sophisticated
+        if self.sophisticated:
+            assert self.policy_len == 1, "Sophisticated inference only works with policy_len = 1"
+        self.si_horizon = si_horizon
+        self.si_policy_prune_threshold = si_policy_prune_threshold
+        self.si_state_prune_threshold = si_state_prune_threshold
+        self.si_prune_penalty = si_prune_penalty
 
         # Initialise observation model (A matrices)
         if not isinstance(A, np.ndarray):
@@ -128,19 +145,21 @@ class Agent(object):
             self.num_controls = num_controls
 
         # checking that `A_factor_list` and `B_factor_list` are consistent with `num_factors`, `num_states`, and lagging dimensions of `A` and `B` tensors
+        self.factorized = False
         if A_factor_list == None:
             self.A_factor_list = self.num_modalities * [list(range(self.num_factors))] # defaults to having all modalities depend on all factors
             for m in range(self.num_modalities):
                 factor_dims = tuple([self.num_states[f] for f in self.A_factor_list[m]])
                 assert self.A[m].shape[1:] == factor_dims, f"Please input an `A_factor_list` whose {m}-th indices pick out the hidden state factors that line up with lagging dimensions of A{m}..." 
-                if self.pA != None:
+                if self.pA is not None:
                     assert self.pA[m].shape[1:] == factor_dims, f"Please input an `A_factor_list` whose {m}-th indices pick out the hidden state factors that line up with lagging dimensions of pA{m}..." 
         else:
+            self.factorized = True
             for m in range(self.num_modalities):
                 assert max(A_factor_list[m]) <= (self.num_factors - 1), f"Check modality {m} of A_factor_list - must be consistent with `num_states` and `num_factors`..."
                 factor_dims = tuple([self.num_states[f] for f in A_factor_list[m]])
                 assert self.A[m].shape[1:] == factor_dims, f"Check modality {m} of A_factor_list. It must coincide with lagging dimensions of A{m}..." 
-                if self.pA != None:
+                if self.pA is not None:
                     assert self.pA[m].shape[1:] == factor_dims, f"Check modality {m} of A_factor_list. It must coincide with lagging dimensions of pA{m}..."
             self.A_factor_list = A_factor_list
 
@@ -160,14 +179,15 @@ class Agent(object):
             for f in range(self.num_factors):
                 factor_dims = tuple([self.num_states[f] for f in self.B_factor_list[f]])
                 assert self.B[f].shape[1:-1] == factor_dims, f"Please input a `B_factor_list` whose {f}-th indices pick out the hidden state factors that line up with the all-but-final lagging dimensions of B{f}..." 
-                if self.pB != None:
+                if self.pA is not None and self.pB is not None:
                     assert self.pB[f].shape[1:-1] == factor_dims, f"Please input a `B_factor_list` whose {f}-th indices pick out the hidden state factors that line up with the all-but-final lagging dimensions of pB{f}..." 
         else:
+            self.factorized = True
             for f in range(self.num_factors):
                 assert max(B_factor_list[f]) <= (self.num_factors - 1), f"Check factor {f} of B_factor_list - must be consistent with `num_states` and `num_factors`..."
                 factor_dims = tuple([self.num_states[f] for f in B_factor_list[f]])
                 assert self.B[f].shape[1:-1] == factor_dims, f"Check factor {f} of B_factor_list. It must coincide with all-but-final lagging dimensions of B{f}..." 
-                if self.pB != None:
+                if self.pA is not None and self.pB is not None:
                     assert self.pB[f].shape[1:-1] == factor_dims, f"Check factor {f} of B_factor_list. It must coincide with all-but-final lagging dimensions of pB{f}..."
             self.B_factor_list = B_factor_list
 
@@ -185,7 +205,7 @@ class Agent(object):
 
         # Again, the use can specify a set of possible policies, or
         # all possible combinations of actions and timesteps will be considered
-        if policies == None:
+        if policies is None:
             policies = self._construct_policies()
         self.policies = policies
 
@@ -248,6 +268,14 @@ class Agent(object):
         else:
             self.E = self._construct_E_prior()
         
+        # Construct I for backwards induction (if H specified)
+        if H is not None:
+            self.H = H
+            self.I = control.backwards_induction(H, B, B_factor_list, threshold=ii_threshold, depth=ii_depth)
+        else:
+            self.H = None
+            self.I = None
+
         self.edge_handling_params = {}
         self.edge_handling_params['use_BMA'] = use_BMA # creates a 'D-like' moving prior
         self.edge_handling_params['policy_sep_prior'] = policy_sep_prior # carries forward last timesteps posterior, in a policy-conditioned way
@@ -357,10 +385,10 @@ class Agent(object):
         else:
             self.qs = init_qs
         
-        if self.pA != None:
+        if self.pA is not None:
             self.A = utils.norm_dist_obj_arr(self.pA)
         
-        if self.pB != None:
+        if self.pB is not None:
             self.B = utils.norm_dist_obj_arr(self.pB)
 
         return self.qs
@@ -500,9 +528,11 @@ class Agent(object):
                 latest_obs = self.prev_obs
                 latest_actions = self.prev_actions
 
-            qs, F = inference.update_posterior_states_full(
+            qs, F = inference.update_posterior_states_full_factorized(
                 self.A,
+                self.mb_dict,
                 self.B,
+                self.B_factor_list,
                 latest_obs,
                 self.policies, 
                 latest_actions, 
@@ -575,7 +605,7 @@ class Agent(object):
         else:
             return qs
 
-    def infer_policies(self):
+    def infer_policies_old(self):
         """
         Perform policy inference by optimizing a posterior (categorical) distribution over policies.
         This distribution is computed as the softmax of ``G * gamma + lnE`` where ``G`` is the negative expected
@@ -602,10 +632,17 @@ class Agent(object):
                 self.use_param_info_gain,
                 self.pA,
                 self.pB,
-                E = self.E,
-                gamma = self.gamma
+                E=self.E,
+                I=self.I,
+                gamma=self.gamma
             )
         elif self.inference_algo == "MMP":
+            if self.factorized:
+                raise NotImplementedError("Factorized inference not implemented for MMP")
+            
+            if self.sophisticated:
+                raise NotImplementedError("Sophisticated inference not implemented for MMP")
+
 
             future_qs_seq = self.get_future_qs()
 
@@ -623,6 +660,7 @@ class Agent(object):
                 self.pB,
                 F = self.F,
                 E = self.E,
+                I=self.I,
                 gamma = self.gamma
             )
 
@@ -635,7 +673,7 @@ class Agent(object):
         self.G = G
         return q_pi, G
     
-    def infer_policies_factorized(self):
+    def infer_policies(self):
         """
         Perform policy inference by optimizing a posterior (categorical) distribution over policies.
         This distribution is computed as the softmax of ``G * gamma + lnE`` where ``G`` is the negative expected
@@ -653,8 +691,48 @@ class Agent(object):
         """
 
         if self.inference_algo == "VANILLA":
-            q_pi, G = control.update_posterior_policies_factorized(
-                self.qs,
+            if self.sophisticated:
+                q_pi, G = control.sophisticated_inference_search(
+                    self.qs, 
+                    self.policies, 
+                    self.A, 
+                    self.B, 
+                    self.C, 
+                    self.A_factor_list, 
+                    self.B_factor_list, 
+                    self.I,
+                    self.si_horizon,
+                    self.si_policy_prune_threshold, 
+                    self.si_state_prune_threshold, 
+                    self.si_prune_penalty,
+                    1.0,
+                    self.inference_params,
+                    n=0
+                )
+            else:
+                q_pi, G = control.update_posterior_policies_factorized(
+                    self.qs,
+                    self.A,
+                    self.B,
+                    self.C,
+                    self.A_factor_list,
+                    self.B_factor_list,
+                    self.policies,
+                    self.use_utility,
+                    self.use_states_info_gain,
+                    self.use_param_info_gain,
+                    self.pA,
+                    self.pB,
+                    E = self.E,
+                    I = self.I,
+                    gamma = self.gamma
+                )
+        elif self.inference_algo == "MMP":
+
+            future_qs_seq = self.get_future_qs()
+
+            q_pi, G = control.update_posterior_policies_full_factorized(
+                future_qs_seq,
                 self.A,
                 self.B,
                 self.C,
@@ -664,32 +742,14 @@ class Agent(object):
                 self.use_utility,
                 self.use_states_info_gain,
                 self.use_param_info_gain,
+                self.latest_belief,
                 self.pA,
                 self.pB,
-                E = self.E,
-                gamma = self.gamma
+                F=self.F,
+                E=self.E,
+                I=self.I,
+                gamma=self.gamma
             )
-        elif self.inference_algo == "MMP":
-            Raise(NotImplementedError("Factorized inference not implemented for MMP"))
-
-        #     future_qs_seq = self.get_future_qs()
-
-        #     q_pi, G = control.update_posterior_policies_full(
-        #         future_qs_seq,
-        #         self.A,
-        #         self.B,
-        #         self.C,
-        #         self.policies,
-        #         self.use_utility,
-        #         self.use_states_info_gain,
-        #         self.use_param_info_gain,
-        #         self.latest_belief,
-        #         self.pA,
-        #         self.pB,
-        #         F = self.F,
-        #         E = self.E,
-        #         gamma = self.gamma
-        #     )
 
         if hasattr(self, "q_pi_hist"):
             self.q_pi_hist.append(q_pi)
@@ -932,7 +992,7 @@ class Agent(object):
         method = self.inference_algo
         default_params = None
         if method == "VANILLA":
-            default_params = {"num_iter": 10, "dF": 1.0, "dF_tol": 0.001}
+            default_params = {"num_iter": 10, "dF": 1.0, "dF_tol": 0.001, "compute_vfe": True}
         elif method == "MMP":
             default_params = {"num_iter": 10, "grad_descent": True, "tau": 0.25}
         elif method == "VMP":
