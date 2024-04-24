@@ -1255,7 +1255,6 @@ def _select_highest_test(options_array, seed=None):
 
     return int(same_prob[0])
 
-
 def backwards_induction(H, B, B_factor_list, threshold, depth):
     """
     Runs backwards induction of reaching a goal state H given a transition model B.
@@ -1464,3 +1463,4 @@ def sophisticated_inference_search(qs, policies, A, B, C, A_factor_list, B_facto
 
     q_pi = softmax(G * gamma)
     return q_pi, G 
+
