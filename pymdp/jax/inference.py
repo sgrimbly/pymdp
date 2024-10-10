@@ -23,10 +23,25 @@ def update_posterior_states(
         num_iter=16, 
         method='fpi'
     ):
+    
+    # print("=== Debugging update_posterior_states ===")
+    
+    # print("Initial A shape:", [a.shape for a in A])
+    # print("Initial B shape:", [b.shape for b in B])
+    # print("Initial obs shape:", [o.shape for o in obs])
+    # print("Initial prior shape:", [p.shape for p in prior])
 
     if method == 'fpi' or method == "ovf":
         # format obs to select only last observation
-        curr_obs = jtu.tree_map(lambda x: x[-1], obs)
+        # Check the shape of obs before and after processing
+        # print("Shape of obs before tree_map:", [o.shape for o in obs])
+        def select_last_and_preserve_batch(x):
+            if x.ndim > 1:
+                return x[:, -1] if x.shape[1] > 1 else x[:, 0]
+            else:
+                return x[-1] if x.shape[0] > 1 else jnp.broadcast_to(x, (2,))  # Ensure consistent batch size
+        curr_obs = jtu.tree_map(select_last_and_preserve_batch, obs)
+        # print("Shape of curr_obs after tree_map:", [o.shape for o in curr_obs])
         qs = run_factorized_fpi(A, curr_obs, prior, A_dependencies, num_iter=num_iter)
     else:
         # format B matrices using action sequences here
