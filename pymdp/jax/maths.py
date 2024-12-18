@@ -63,6 +63,9 @@ def factor_dot_flex(M, xs, dims: List[Tuple[int]], keep_dims: Optional[Tuple[int
 
 def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
     """Return observation likelihood for a single observation modality m"""
+    
+    print("Shape of o_m before expand_dims:", o_m.shape)
+
     if distr_obs:
         expanded_obs = jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
         likelihood = (expanded_obs * A_m).sum(axis=0)
@@ -71,9 +74,14 @@ def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
 
     return likelihood
 
+
 def compute_log_likelihood_single_modality(o_m, A_m, distr_obs=True):
     """Compute observation log-likelihood for a single modality"""
+    print("Shape of o_m:", o_m.shape)
+    print("Shape of A_m:", A_m.shape)
+
     return log_stable(get_likelihood_single_modality(o_m, A_m, distr_obs=distr_obs))
+
 
 def compute_log_likelihood(obs, A, distr_obs=True):
     """ Compute likelihood over hidden states across observations from different modalities """

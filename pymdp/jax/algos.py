@@ -69,6 +69,11 @@ def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
     """
     Run the fixed point iteration algorithm with sparse dependencies between factors and outcomes (stored in `A_dependencies`)
     """
+    
+    print("=== run_factorized_fpi ===")
+    print("obs shapes in run_factorized_fpi:", [o.shape if hasattr(o, 'shape') else 'scalar' for o in obs])
+    print("A shapes in run_factorized_fpi:", [a.shape for a in A])
+
 
     # Step 1: Compute log likelihoods for each factor
     log_likelihoods = compute_log_likelihood_per_modality(obs, A)
