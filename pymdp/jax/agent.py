@@ -374,8 +374,13 @@ class Agent(Module):
 
         if not self.onehot_obs:
             o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
+            print("Shape after one-hot encoding:", [o.shape for o in o_vec])
         else:
             o_vec = observations
+            
+        # # After applying one-hot encoding in infer_states:
+        # o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
+        # print(f"After one-hot encoding, o_vec shapes: {[o.shape for o in o_vec]}")
 
         A = self.A
         B = self.B
@@ -385,13 +390,19 @@ class Agent(Module):
                 o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
                 A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
 
-        # Debugging: Print the shapes after masking
+        # Debugging: Print the shapes after masking (mask might be None)
         print("o_vec shape after masking:", [o.shape for o in o_vec])
         print("A shape after masking (if applied):", [a.shape for a in A])
         print("B shape:", [b.shape for b in B])
 
         # Determine the expected batch size (from the first dimension of A)
         batch_size = A[0].shape[0]
+        
+        print("Shapes before ensuring batch size consistency:")
+        print("o_vec shape:", [o.shape for o in o_vec])
+        print("A shape:", [a.shape for a in A])
+        print("B shape:", [b.shape for b in B])
+        print("empirical_prior shape:", [p.shape for p in empirical_prior])
 
         # Ensure batch size consistency across all inputs
         def ensure_batch_size(tensors, expected_batch_size):
@@ -421,7 +432,6 @@ class Agent(Module):
             method=self.inference_algo
         )
 
-        # Debugging: Print inputs to vmap
         print("Shapes before vmap:")
         print("A:", [a.shape for a in A])
         print("B:", [b.shape for b in B])

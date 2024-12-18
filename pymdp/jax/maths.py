@@ -85,7 +85,6 @@ def compute_log_likelihood(obs, A, distr_obs=True):
 def compute_log_likelihood_per_modality(obs, A, distr_obs=True):
     """ Compute likelihood over hidden states across observations from different modalities, and return them per modality """
     ll_all = tree_util.tree_map(lambda o, a: compute_log_likelihood_single_modality(o, a, distr_obs=distr_obs), obs, A)
-
     return ll_all
 
 def compute_accuracy(qs, obs, A):

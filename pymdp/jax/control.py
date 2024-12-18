@@ -196,8 +196,9 @@ def compute_expected_obs(qs, A, A_dependencies):
         relevant_factors = [qs[idx] for idx in deps]
         return factor_dot(A_m, relevant_factors, keep_dims=(0,))
 
-    return jtu.tree_map(compute_expected_obs_modality, A, list(range(len(A))))
-
+    # return jtu.tree_map(compute_expected_obs_modality, A, list(range(len(A))))
+    # In compute_expected_obs function:
+    return jtu.tree_map(compute_expected_obs_modality, A, tuple(range(len(A))))
 def compute_info_gain(qs, qo, A, A_dependencies):
     """
     New version of expected information gain that takes into account sparse dependencies between observation modalities and hidden state factors.
@@ -211,7 +212,7 @@ def compute_info_gain(qs, qo, A, A_dependencies):
         qs_H_A_m = factor_dot(H_A_m, relevant_factors)
         return H_qo - qs_H_A_m
     
-    info_gains_per_modality = jtu.tree_map(compute_info_gain_for_modality, qo, A, list(range(len(A))))
+    info_gains_per_modality = jtu.tree_map(compute_info_gain_for_modality, qo, A, tuple(range(len(A))))
         
     return jtu.tree_reduce(lambda x,y: x+y, info_gains_per_modality)
 
