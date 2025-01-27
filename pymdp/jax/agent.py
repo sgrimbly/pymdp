@@ -316,114 +316,39 @@ class Agent(Module):
 
         return agent
     
-    # def infer_states(self, observations, empirical_prior, *, past_actions=None, qs_hist=None, mask=None):
-    #     """
-    #     Update approximate posterior over hidden states by solving variational inference problem, given an observation.
-
-    #     Parameters
-    #     ----------
-    #     observations: ``list`` or ``tuple`` of ints
-    #         The observation input. Each entry ``observation[m]`` stores one-hot vectors representing the observations for modality ``m``.
-    #     past_actions: ``list`` or ``tuple`` of ints
-    #         The action input. Each entry ``past_actions[f]`` stores indices (or one-hots?) representing the actions for control factor ``f``.
-    #     empirical_prior: ``list`` or ``tuple`` of ``jax.numpy.ndarray`` of dtype object
-    #         Empirical prior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``empirical_prior`` variable may be a matrix (or list of matrices) 
-    #         of additional dimensions to encode extra conditioning variables like timepoint and policy.
-    #     Returns
-    #     ---------
-    #     qs: ``numpy.ndarray`` of dtype object
-    #         Posterior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``qs`` variable will have additional sub-structure to reflect whether
-    #         beliefs are additionally conditioned on timepoint and policy.
-    #         For example, in case the ``self.inference_algo == 'MMP' `` indexing structure is policy->timepoint-->factor, so that 
-    #         ``qs[p_idx][t_idx][f_idx]`` refers to beliefs about marginal factor ``f_idx`` expected under policy ``p_idx`` 
-    #         at timepoint ``t_idx``.
-    #     """
-    #     if not self.onehot_obs:
-    #         o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
-    #     else:
-    #         o_vec = observations
-        
-    #     A = self.A
-    #     if mask is not None:
-    #         for i, m in enumerate(mask):
-    #             o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
-    #             A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
-
-    #     infer_states = partial(
-    #         inference.update_posterior_states,
-    #         A_dependencies=self.A_dependencies,
-    #         B_dependencies=self.B_dependencies,
-    #         num_iter=self.num_iter,
-    #         method=self.inference_algo
-    #     )
-        
-    #     output = vmap(infer_states)(
-    #         A,
-    #         self.B,
-    #         o_vec,
-    #         past_actions,
-    #         prior=empirical_prior,
-    #         qs_hist=qs_hist
-    #     )
-
-    #     return output
-    
     def infer_states(self, observations, empirical_prior, *, past_actions=None, qs_hist=None, mask=None):
-        # Before one-hot encoding
-        # print("Initial observations shape:", [o.shape for o in observations])
+        """
+        Update approximate posterior over hidden states by solving variational inference problem, given an observation.
 
+        Parameters
+        ----------
+        observations: ``list`` or ``tuple`` of ints
+            The observation input. Each entry ``observation[m]`` stores one-hot vectors representing the observations for modality ``m``.
+        past_actions: ``list`` or ``tuple`` of ints
+            The action input. Each entry ``past_actions[f]`` stores indices (or one-hots?) representing the actions for control factor ``f``.
+        empirical_prior: ``list`` or ``tuple`` of ``jax.numpy.ndarray`` of dtype object
+            Empirical prior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``empirical_prior`` variable may be a matrix (or list of matrices) 
+            of additional dimensions to encode extra conditioning variables like timepoint and policy.
+        Returns
+        ---------
+        qs: ``numpy.ndarray`` of dtype object
+            Posterior beliefs over hidden states. Depending on the inference algorithm chosen, the resulting ``qs`` variable will have additional sub-structure to reflect whether
+            beliefs are additionally conditioned on timepoint and policy.
+            For example, in case the ``self.inference_algo == 'MMP' `` indexing structure is policy->timepoint-->factor, so that 
+            ``qs[p_idx][t_idx][f_idx]`` refers to beliefs about marginal factor ``f_idx`` expected under policy ``p_idx`` 
+            at timepoint ``t_idx``.
+        """
         if not self.onehot_obs:
             o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
-            # print("Shape after one-hot encoding:", [o.shape for o in o_vec])
         else:
             o_vec = observations
-            
-        # # After applying one-hot encoding in infer_states:
-        # o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
-        # print(f"After one-hot encoding, o_vec shapes: {[o.shape for o in o_vec]}")
-
+        
         A = self.A
-        B = self.B
-
         if mask is not None:
             for i, m in enumerate(mask):
                 o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
                 A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
 
-        # Debugging: Print the shapes after masking (mask might be None)
-        # print("o_vec shape after masking:", [o.shape for o in o_vec])
-        # print("A shape after masking (if applied):", [a.shape for a in A])
-        # print("B shape:", [b.shape for b in B])
-
-        # Determine the expected batch size (from the first dimension of A)
-        batch_size = A[0].shape[0]
-        
-        # print("Shapes before ensuring batch size consistency:")
-        # print("o_vec shape:", [o.shape for o in o_vec])
-        # print("A shape:", [a.shape for a in A])
-        # print("B shape:", [b.shape for b in B])
-        # print("empirical_prior shape:", [p.shape for p in empirical_prior])
-
-        # Ensure batch size consistency across all inputs
-        def ensure_batch_size(tensors, expected_batch_size):
-            return [jnp.broadcast_to(t, (expected_batch_size,) + t.shape[1:]) if t.shape[0] != expected_batch_size else t for t in tensors]
-
-        o_vec = ensure_batch_size(o_vec, batch_size)
-        A = ensure_batch_size(A, batch_size)
-        B = ensure_batch_size(B, batch_size)
-        empirical_prior = ensure_batch_size(empirical_prior, batch_size)
-
-        # Debugging: Print the shapes after ensuring batch size
-        # print("Shapes after ensuring batch size consistency:")
-        # print("o_vec shape:", [o.shape for o in o_vec])
-        # print("A shape:", [a.shape for a in A])
-        # print("B shape:", [b.shape for b in B])
-        # print("empirical_prior shape:", [p.shape for p in empirical_prior])
-
-        if qs_hist is not None:
-            qs_hist = ensure_batch_size(qs_hist, batch_size)
-
-        # Run the inference function with vmap
         infer_states = partial(
             inference.update_posterior_states,
             A_dependencies=self.A_dependencies,
@@ -431,26 +356,101 @@ class Agent(Module):
             num_iter=self.num_iter,
             method=self.inference_algo
         )
-
-        # print("Shapes before vmap:")
-        # print("A:", [a.shape for a in A])
-        # print("B:", [b.shape for b in B])
-        # print("o_vec:", [o.shape for o in o_vec])
-        # print("empirical_prior:", [p.shape for p in empirical_prior])
-
+        
         output = vmap(infer_states)(
             A,
-            B,
+            self.B,
             o_vec,
             past_actions,
             prior=empirical_prior,
             qs_hist=qs_hist
         )
 
-        # Debugging: Print output shapes
-        # print("Output shape after vmap:", [o.shape for o in output])
-
         return output
+    
+    # def infer_states(self, observations, empirical_prior, *, past_actions=None, qs_hist=None, mask=None):
+    #     # Before one-hot encoding
+    #     # print("Initial observations shape:", [o.shape for o in observations])
+
+    #     if not self.onehot_obs:
+    #         o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
+    #         # print("Shape after one-hot encoding:", [o.shape for o in o_vec])
+    #     else:
+    #         o_vec = observations
+            
+    #     # # After applying one-hot encoding in infer_states:
+    #     # o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
+    #     # print(f"After one-hot encoding, o_vec shapes: {[o.shape for o in o_vec]}")
+
+    #     A = self.A
+    #     B = self.B
+
+    #     if mask is not None:
+    #         for i, m in enumerate(mask):
+    #             o_vec[i] = m * o_vec[i] + (1 - m) * jnp.ones_like(o_vec[i]) / self.num_obs[i]
+    #             A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
+
+    #     # Debugging: Print the shapes after masking (mask might be None)
+    #     # print("o_vec shape after masking:", [o.shape for o in o_vec])
+    #     # print("A shape after masking (if applied):", [a.shape for a in A])
+    #     # print("B shape:", [b.shape for b in B])
+
+    #     # Determine the expected batch size (from the first dimension of A)
+    #     batch_size = A[0].shape[0]
+        
+    #     # print("Shapes before ensuring batch size consistency:")
+    #     # print("o_vec shape:", [o.shape for o in o_vec])
+    #     # print("A shape:", [a.shape for a in A])
+    #     # print("B shape:", [b.shape for b in B])
+    #     # print("empirical_prior shape:", [p.shape for p in empirical_prior])
+
+    #     # Ensure batch size consistency across all inputs
+    #     def ensure_batch_size(tensors, expected_batch_size):
+    #         return [jnp.broadcast_to(t, (expected_batch_size,) + t.shape[1:]) if t.shape[0] != expected_batch_size else t for t in tensors]
+
+    #     o_vec = ensure_batch_size(o_vec, batch_size)
+    #     A = ensure_batch_size(A, batch_size)
+    #     B = ensure_batch_size(B, batch_size)
+    #     empirical_prior = ensure_batch_size(empirical_prior, batch_size)
+
+    #     # Debugging: Print the shapes after ensuring batch size
+    #     # print("Shapes after ensuring batch size consistency:")
+    #     # print("o_vec shape:", [o.shape for o in o_vec])
+    #     # print("A shape:", [a.shape for a in A])
+    #     # print("B shape:", [b.shape for b in B])
+    #     # print("empirical_prior shape:", [p.shape for p in empirical_prior])
+
+    #     if qs_hist is not None:
+    #         qs_hist = ensure_batch_size(qs_hist, batch_size)
+
+    #     # Run the inference function with vmap
+    #     infer_states = partial(
+    #         inference.update_posterior_states,
+    #         A_dependencies=self.A_dependencies,
+    #         B_dependencies=self.B_dependencies,
+    #         num_iter=self.num_iter,
+    #         method=self.inference_algo
+    #     )
+
+    #     # print("Shapes before vmap:")
+    #     # print("A:", [a.shape for a in A])
+    #     # print("B:", [b.shape for b in B])
+    #     # print("o_vec:", [o.shape for o in o_vec])
+    #     # print("empirical_prior:", [p.shape for p in empirical_prior])
+
+    #     output = vmap(infer_states)(
+    #         A,
+    #         B,
+    #         o_vec,
+    #         past_actions,
+    #         prior=empirical_prior,
+    #         qs_hist=qs_hist
+    #     )
+
+    #     # Debugging: Print output shapes
+    #     # print("Output shape after vmap:", [o.shape for o in output])
+
+    #     return output
 
     def update_empirical_prior(self, action, qs):
         # return empirical_prior, and the history of posterior beliefs (filtering distributions) held about hidden states at times 1, 2 ... t
