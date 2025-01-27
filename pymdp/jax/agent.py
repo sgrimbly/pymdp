@@ -370,11 +370,11 @@ class Agent(Module):
     
     def infer_states(self, observations, empirical_prior, *, past_actions=None, qs_hist=None, mask=None):
         # Before one-hot encoding
-        print("Initial observations shape:", [o.shape for o in observations])
+        # print("Initial observations shape:", [o.shape for o in observations])
 
         if not self.onehot_obs:
             o_vec = [nn.one_hot(o, self.num_obs[m]) for m, o in enumerate(observations)]
-            print("Shape after one-hot encoding:", [o.shape for o in o_vec])
+            # print("Shape after one-hot encoding:", [o.shape for o in o_vec])
         else:
             o_vec = observations
             
@@ -391,18 +391,18 @@ class Agent(Module):
                 A[i] = m * A[i] + (1 - m) * jnp.ones_like(A[i]) / self.num_obs[i]
 
         # Debugging: Print the shapes after masking (mask might be None)
-        print("o_vec shape after masking:", [o.shape for o in o_vec])
-        print("A shape after masking (if applied):", [a.shape for a in A])
-        print("B shape:", [b.shape for b in B])
+        # print("o_vec shape after masking:", [o.shape for o in o_vec])
+        # print("A shape after masking (if applied):", [a.shape for a in A])
+        # print("B shape:", [b.shape for b in B])
 
         # Determine the expected batch size (from the first dimension of A)
         batch_size = A[0].shape[0]
         
-        print("Shapes before ensuring batch size consistency:")
-        print("o_vec shape:", [o.shape for o in o_vec])
-        print("A shape:", [a.shape for a in A])
-        print("B shape:", [b.shape for b in B])
-        print("empirical_prior shape:", [p.shape for p in empirical_prior])
+        # print("Shapes before ensuring batch size consistency:")
+        # print("o_vec shape:", [o.shape for o in o_vec])
+        # print("A shape:", [a.shape for a in A])
+        # print("B shape:", [b.shape for b in B])
+        # print("empirical_prior shape:", [p.shape for p in empirical_prior])
 
         # Ensure batch size consistency across all inputs
         def ensure_batch_size(tensors, expected_batch_size):
@@ -414,11 +414,11 @@ class Agent(Module):
         empirical_prior = ensure_batch_size(empirical_prior, batch_size)
 
         # Debugging: Print the shapes after ensuring batch size
-        print("Shapes after ensuring batch size consistency:")
-        print("o_vec shape:", [o.shape for o in o_vec])
-        print("A shape:", [a.shape for a in A])
-        print("B shape:", [b.shape for b in B])
-        print("empirical_prior shape:", [p.shape for p in empirical_prior])
+        # print("Shapes after ensuring batch size consistency:")
+        # print("o_vec shape:", [o.shape for o in o_vec])
+        # print("A shape:", [a.shape for a in A])
+        # print("B shape:", [b.shape for b in B])
+        # print("empirical_prior shape:", [p.shape for p in empirical_prior])
 
         if qs_hist is not None:
             qs_hist = ensure_batch_size(qs_hist, batch_size)
@@ -432,11 +432,11 @@ class Agent(Module):
             method=self.inference_algo
         )
 
-        print("Shapes before vmap:")
-        print("A:", [a.shape for a in A])
-        print("B:", [b.shape for b in B])
-        print("o_vec:", [o.shape for o in o_vec])
-        print("empirical_prior:", [p.shape for p in empirical_prior])
+        # print("Shapes before vmap:")
+        # print("A:", [a.shape for a in A])
+        # print("B:", [b.shape for b in B])
+        # print("o_vec:", [o.shape for o in o_vec])
+        # print("empirical_prior:", [p.shape for p in empirical_prior])
 
         output = vmap(infer_states)(
             A,
@@ -448,7 +448,7 @@ class Agent(Module):
         )
 
         # Debugging: Print output shapes
-        print("Output shape after vmap:", [o.shape for o in output])
+        # print("Output shape after vmap:", [o.shape for o in output])
 
         return output
 
@@ -539,30 +539,58 @@ class Agent(Module):
 
         return marginals
 
-    def sample_action(self, q_pi: Array, rng_key=None):
-        """
-        Sample or select a discrete action from the posterior over control states.
+    # def sample_action(self, q_pi: Array, rng_key=None):
+    #     """
+    #     Sample or select a discrete action from the posterior over control states.
         
-        Returns
-        ----------
-        action: 1D ``jax.numpy.ndarray``
-            Vector containing the indices of the actions for each control factor
-        action_probs: 2D ``jax.numpy.ndarray``
-            Array of action probabilities
-        """
+    #     Returns
+    #     ----------
+    #     action: 1D ``jax.numpy.ndarray``
+    #         Vector containing the indices of the actions for each control factor
+    #     action_probs: 2D ``jax.numpy.ndarray``
+    #         Array of action probabilities
+    #     """
 
+    #     if (rng_key is None) and (self.action_selection == "stochastic"):
+    #         raise ValueError("Please provide a random number generator key to sample actions stochastically")
+
+    #     if self.sampling_mode == "marginal":
+    #         sample_action = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
+    #         action = vmap(sample_action)(q_pi, alpha=self.alpha, rng_key=rng_key)
+    #     elif self.sampling_mode == "full":
+    #         sample_policy = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
+    #         action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
+
+    #     return action
+    
+    def sample_action(self, q_pi: Array, rng_key=None):
         if (rng_key is None) and (self.action_selection == "stochastic"):
             raise ValueError("Please provide a random number generator key to sample actions stochastically")
 
+        print(f"Sampling mode: {self.sampling_mode}")
+        print(f"Action selection method: {self.action_selection}")
+        print(f"q_pi: {q_pi}")
+        print(f"Random key: {rng_key}")
+
         if self.sampling_mode == "marginal":
-            sample_action = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
+            sample_action = partial(
+                control.sample_action, 
+                self.policies, 
+                self.num_controls, 
+                action_selection=self.action_selection
+            )
             action = vmap(sample_action)(q_pi, alpha=self.alpha, rng_key=rng_key)
         elif self.sampling_mode == "full":
-            sample_policy = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
+            sample_policy = partial(
+                control.sample_policy, 
+                self.policies, 
+                action_selection=self.action_selection
+            )
             action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
 
+        print(f"Sampled action: {action}")
         return action
-    
+
     def _get_default_params(self):
         method = self.inference_algo
         default_params = None
