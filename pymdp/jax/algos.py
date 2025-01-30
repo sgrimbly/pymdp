@@ -67,30 +67,56 @@ def run_vanilla_fpi(A, obs, prior, num_iter=1, distr_obs=True):
 
 def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
     """
-    Run the fixed point iteration algorithm with sparse dependencies between factors and outcomes (stored in `A_dependencies`)
+    Run the fixed point iteration algorithm with sparse dependencies 
+    between factors and outcomes (stored in `A_dependencies`).
     """
 
     # Step 1: Compute log likelihoods for each factor
     log_likelihoods = compute_log_likelihood_per_modality(obs, A)
+    print("\n=== Debug: Log Likelihoods ===")
+    print("log_likelihoods structure:", jtu.tree_map(lambda x: type(x), log_likelihoods))
+    print("log_likelihoods shapes:", [ll.shape for ll in log_likelihoods])
 
     # Step 2: Map prior to log space and create initial log-posterior
     log_prior = jtu.tree_map(log_stable, prior)
     log_q = jtu.tree_map(jnp.zeros_like, prior)
+    print("\n=== Debug: Log Prior ===")
+    print("log_prior shapes:", [lp.shape for lp in log_prior])
+
+    print("\n=== Debug: Initial Log Q ===")
+    print("log_q shapes:", [lq.shape for lq in log_q])
 
     # Step 3: Iterate until convergence
     def scan_fn(carry, t):
         log_q = carry
         q = jtu.tree_map(nn.softmax, log_q)
         marginal_ll = all_marginal_log_likelihood(q, log_likelihoods, A_dependencies)
-        log_q = jtu.tree_map(add, marginal_ll, log_prior)
 
+        # Debug prints
+        print("marginal_ll shapes before broadcasting:", [ml.shape for ml in marginal_ll])
+        print("log_prior shapes:", [lp.shape for lp in log_prior])
+
+        # Ensure marginal_ll aligns with log_prior
+        marginal_ll = jtu.tree_map(
+            lambda x, p: jnp.broadcast_to(x, p.shape) if x.ndim < p.ndim else x,
+            marginal_ll, log_prior
+        )
+        print("marginal_ll shapes after broadcasting:", [ml.shape for ml in marginal_ll])
+
+        log_q = jtu.tree_map(add, marginal_ll, log_prior)
+        print("Updated log_q shapes:", [lq.shape for lq in log_q])
         return log_q, None
+
+
 
     res, _ = lax.scan(scan_fn, log_q, jnp.arange(num_iter))
 
     # Step 4: Map result to factorised posterior
     qs = jtu.tree_map(nn.softmax, res)
+    print("\n=== Debug: Final QS ===")
+    print("qs shapes:", [qq.shape for qq in qs])
     return qs
+
 
 def mirror_gradient_descent_step(tau, ln_A, lnB_past, lnB_future, ln_qs):
     """

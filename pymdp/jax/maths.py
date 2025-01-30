@@ -63,7 +63,15 @@ def factor_dot_flex(M, xs, dims: List[Tuple[int]], keep_dims: Optional[Tuple[int
 
 def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
     """Return observation likelihood for a single observation modality m"""
+    # if o_m.ndim == 0:
+    #     # Expand scalar to match the feature dimension
+    #     o_m = jnp.expand_dims(o_m, axis=0)
+    # elif o_m.ndim == 1 and A_m.ndim > 1:
+    #     o_m = jnp.expand_dims(o_m, axis=0)
+
+        
     if distr_obs:
+        print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
         expanded_obs = jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
         likelihood = (expanded_obs * A_m).sum(axis=0)
     else:
