@@ -20,6 +20,10 @@ def update_obs_likelihood_dirichlet_m(pA_m, obs_m, qs, dependencies_m, lr=1.0):
     # \mathbf{s}_{f \in parents(m), t} = categorical parameters of marginal posteriors over hidden state factors that are parents of modality m, at time t
     # \otimes is a multidimensional outer product, not just a outer product of two vectors
     # \kappa is an optional learning rate
+    
+    # Ensure obs_m is batched; if it is 1D, add a new axis at the front.
+    if obs_m.ndim == 1:
+        obs_m = obs_m[None, :]  # now shape (1, num_obs)
 
     relevant_factors = tree_map(lambda f_idx: qs[f_idx], dependencies_m)
 
