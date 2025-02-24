@@ -248,6 +248,7 @@ class Agent(Module):
         self.policies =  control.construct_policies(
             self.num_states, self.num_controls, self.policy_len, self.control_fac_idx
         )
+        # print(self.policies)
 
     @vmap
     def _construct_I(self):
@@ -301,6 +302,7 @@ class Agent(Module):
             lr = jnp.broadcast_to(lr_pB, (self.batch_size,))
             qB, E_qB = vmap(update_B)(
                 self.pB,
+                self.B,
                 joint_beliefs,
                 actions,
                 lr=lr
@@ -539,57 +541,30 @@ class Agent(Module):
 
         return marginals
 
-    # def sample_action(self, q_pi: Array, rng_key=None):
-    #     """
-    #     Sample or select a discrete action from the posterior over control states.
-        
-    #     Returns
-    #     ----------
-    #     action: 1D ``jax.numpy.ndarray``
-    #         Vector containing the indices of the actions for each control factor
-    #     action_probs: 2D ``jax.numpy.ndarray``
-    #         Array of action probabilities
-    #     """
-
-    #     if (rng_key is None) and (self.action_selection == "stochastic"):
-    #         raise ValueError("Please provide a random number generator key to sample actions stochastically")
-
-    #     if self.sampling_mode == "marginal":
-    #         sample_action = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
-    #         action = vmap(sample_action)(q_pi, alpha=self.alpha, rng_key=rng_key)
-    #     elif self.sampling_mode == "full":
-    #         sample_policy = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
-    #         action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
-
-    #     return action
-    
     def sample_action(self, q_pi: Array, rng_key=None):
+        """
+        Sample or select a discrete action from the posterior over control states.
+        
+        Returns
+        ----------
+        action: 1D ``jax.numpy.ndarray``
+            Vector containing the indices of the actions for each control factor
+        action_probs: 2D ``jax.numpy.ndarray``
+            Array of action probabilities
+        """
+
         if (rng_key is None) and (self.action_selection == "stochastic"):
             raise ValueError("Please provide a random number generator key to sample actions stochastically")
 
-        print(f"Sampling mode: {self.sampling_mode}")
-        print(f"Action selection method: {self.action_selection}")
-        print(f"q_pi: {q_pi}")
-        print(f"Random key: {rng_key}")
-
         if self.sampling_mode == "marginal":
-            sample_action = partial(
-                control.sample_action, 
-                self.policies, 
-                self.num_controls, 
-                action_selection=self.action_selection
-            )
+            sample_action = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
             action = vmap(sample_action)(q_pi, alpha=self.alpha, rng_key=rng_key)
         elif self.sampling_mode == "full":
-            sample_policy = partial(
-                control.sample_policy, 
-                self.policies, 
-                action_selection=self.action_selection
-            )
+            sample_policy = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
             action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
 
-        print(f"Sampled action: {action}")
         return action
+    
 
     def _get_default_params(self):
         method = self.inference_algo

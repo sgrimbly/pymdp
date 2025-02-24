@@ -90,11 +90,41 @@ def sample_policy(policies, q_pi, action_selection="deterministic", alpha = 16.0
     if action_selection == "deterministic":
         policy_idx = jnp.argmax(q_pi)
     elif action_selection == "stochastic":
-        log_p_policies = log_stable(q_pi) * alpha
-        policy_idx = jr.categorical(rng_key, log_p_policies)
-
+        log_p_policies = log_stable(q_pi)
+        scaled_logits = log_p_policies * jnp.array(alpha).reshape(1)
+        policy_idx = jr.categorical(key=rng_key, logits=scaled_logits)
+        # print("Selected policy indices:", policy_idx)
+        # print("Selected policies:", policies[policy_idx])
+        
     selected_multiaction = policies[policy_idx, 0]
     return selected_multiaction
+
+# def sample_policy(policies, q_pi, action_selection="deterministic", alpha=1.0, rng_key=None):
+#     """
+#     Sample policies using either deterministic or stochastic selection
+    
+#     Args:
+#         policies (Array): Policy array of shape (num_policies, num_timesteps, action_dim)
+#         q_pi (Array): Policy probabilities of shape (batch_size, num_policies)
+#         action_selection (str): Selection method ('deterministic' or 'stochastic')
+#         alpha (float): Temperature parameter for softmax
+#         rng_key (Array): Random key of shape (batch_size, 2)
+    
+#     Returns:
+#         Array: Selected actions of shape (batch_size, action_dim)
+#     """
+#     print(f"Input shapes: q_pi {q_pi.shape}, rng_key {rng_key.shape}")
+#     if action_selection == "deterministic":
+#         policy_idx = jnp.argmax(q_pi, axis=-1)
+#     elif action_selection == "stochastic":
+#         log_p_policies = log_stable(q_pi) * alpha
+#         policy_idx = jr.categorical(key=rng_key, logits=log_p_policies, shape=(q_pi.shape[0],))
+                
+#     # Get first action from selected policies
+#     batch_idx = jnp.arange(policy_idx.shape[0])
+#     selected_multiaction = policies[policy_idx][batch_idx, 0]
+    
+#     return selected_multiaction
 
 def construct_policies(num_states, num_controls = None, policy_len=1, control_fac_idx=None):
     """

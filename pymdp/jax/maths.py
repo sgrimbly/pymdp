@@ -33,7 +33,7 @@ def factor_dot(M, xs, keep_dims: Optional[Tuple[int]] = None):
     - `Y` [1D numpy.ndarray] - the result of the dot product
     """
     d = len(keep_dims) if keep_dims is not None else 0
-    assert M.ndim == len(xs) + d
+    # assert M.ndim == len(xs) + d
     keep_dims = () if keep_dims is None else keep_dims
     dims = tuple((i,) for i in range(M.ndim) if i not in keep_dims)
     return factor_dot_flex(M, xs, dims, keep_dims=keep_dims)
@@ -71,7 +71,7 @@ def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
 
         
     if distr_obs:
-        print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
+        # print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
         expanded_obs = jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
         likelihood = (expanded_obs * A_m).sum(axis=0)
     else:
