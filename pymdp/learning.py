@@ -20,8 +20,24 @@ def update_obs_likelihood_dirichlet_m(pA_m, obs_m, qs, dependencies_m, lr=1.0):
     # \mathbf{s}_{f \in parents(m), t} = categorical parameters of marginal posteriors over hidden state factors that are parents of modality m, at time t
     # \otimes is a multidimensional outer product, not just a outer product of two vectors
     # \kappa is an optional learning rate
+    
+    # <<< Add print statement BEFORE the modification >>>
+    print(f"[DEBUG update_m] Initial obs_m shape: {obs_m.shape}")
+    jax.debug.print("[DEBUG update_m] Initial obs_m shape: {x}", x=obs_m.shape) # JAX-compatible print
+
+    # <<< Your added lines >>>
+    if obs_m.ndim == 1:
+        print(f"[DEBUG update_m] obs_m is 1D, adding dimension.")
+        jax.debug.print("[DEBUG update_m] obs_m is 1D, adding dimension.")
+        obs_m = obs_m[None, :]  # now shape (1, num_obs)
 
     relevant_factors = tree_map(lambda f_idx: qs[f_idx], dependencies_m)
+
+    # <<< Add print statement AFTER modification, BEFORE vmap >>>
+    print(f"[DEBUG update_m] Final obs_m shape before vmap: {obs_m.shape}")
+    print(f"[DEBUG update_m] relevant_factors shapes before vmap: {[f.shape for f in relevant_factors]}")
+    jax.debug.print("[DEBUG update_m] Final obs_m shape before vmap: {x}", x=obs_m.shape)
+    jax.debug.print("[DEBUG update_m] relevant_factors shapes before vmap: {x}", x=[f.shape for f in relevant_factors])
 
     dfda = vmap(multidimensional_outer)([obs_m] + relevant_factors).sum(axis=0)
 
