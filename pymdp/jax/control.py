@@ -4,6 +4,7 @@
 # pylint: disable=not-an-iterable
 
 import itertools
+import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from typing import List, Tuple, Optional
@@ -186,75 +187,258 @@ def update_posterior_policies(policy_matrix, qs_init, A, B, C, E, pA, pB, A_depe
 
     return nn.softmax(gamma * neg_efe_all_policies + log_stable(E)), neg_efe_all_policies
 
-def compute_expected_state(qs_prior, B, u_t, B_dependencies=None): 
-    """
-    Compute posterior over next state, given belief about previous state, transition model and action...
-    """
-    #Note: this algorithm is only correct if each factor depends only on itself. For any interactions, 
-    # we will have empirical priors with codependent factors. 
-    assert len(u_t) == len(B)  
-    qs_next = []
-    for B_f, u_f, deps in zip(B, u_t, B_dependencies):
-        relevant_factors = [qs_prior[idx] for idx in deps]
-        qs_next_f = factor_dot(B_f[...,u_f], relevant_factors, keep_dims=(0,))
-        qs_next.append(qs_next_f)
+# def compute_expected_state(qs_prior, B, u_t, B_dependencies=None): 
+#     """
+#     Compute posterior over next state, given belief about previous state, transition model and action...
+#     """
+#     #Note: this algorithm is only correct if each factor depends only on itself. For any interactions, 
+#     # we will have empirical priors with codependent factors. 
+#     assert len(u_t) == len(B)  
+#     qs_next = []
+#     for B_f, u_f, deps in zip(B, u_t, B_dependencies):
+#         relevant_factors = [qs_prior[idx] for idx in deps]
+#         qs_next_f = factor_dot(B_f[...,u_f], relevant_factors, keep_dims=(0,))
+#         qs_next.append(qs_next_f)
         
-    # P(s'|s, u) = \sum_{s, u} P(s'|s) P(s|u) P(u|pi)P(pi) because u </-> pi
+#     # P(s'|s, u) = \sum_{s, u} P(s'|s) P(s|u) P(u|pi)P(pi) because u </-> pi
+#     return qs_next
+
+# def compute_expected_state_and_Bs(qs_prior, B, u_t): 
+#     """
+#     Compute posterior over next state, given belief about previous state, transition model and action...
+#     """
+#     assert len(u_t) == len(B)  
+#     qs_next = []
+#     Bs = []
+#     for qs_f, B_f, u_f in zip(qs_prior, B, u_t):
+#         qs_next.append( B_f[..., u_f].dot(qs_f) )
+#         Bs.append(B_f[..., u_f])
+    
+#     return qs_next, Bs
+
+# def compute_expected_obs(qs, A, A_dependencies):
+#     """
+#     New version of expected observation (computation of Q(o|pi)) that takes into account sparse dependencies between observation
+#     modalities and hidden state factors
+#     """
+        
+#     def compute_expected_obs_modality(A_m, m):
+#         deps = A_dependencies[m]
+#         relevant_factors = [qs[idx] for idx in deps]
+#         return factor_dot(A_m, relevant_factors, keep_dims=(0,))
+
+#     return jtu.tree_map(compute_expected_obs_modality, A, list(range(len(A))))
+
+# def compute_info_gain(qs, qo, A, A_dependencies):
+#     """
+#     New version of expected information gain that takes into account sparse dependencies between observation modalities and hidden state factors.
+#     """
+
+#     def compute_info_gain_for_modality(qo_m, A_m, m):
+#         H_qo = stable_entropy(qo_m)
+#         H_A_m = - stable_xlogx(A_m).sum(0)
+#         deps = A_dependencies[m]
+#         relevant_factors = [qs[idx] for idx in deps]
+#         qs_H_A_m = factor_dot(H_A_m, relevant_factors)
+#         return H_qo - qs_H_A_m
+    
+#     info_gains_per_modality = jtu.tree_map(compute_info_gain_for_modality, qo, A, list(range(len(A))))
+        
+#     return jtu.tree_reduce(lambda x,y: x+y, info_gains_per_modality)
+
+# def compute_expected_utility(t, qo, C):
+    
+#     util = 0.
+#     for o_m, C_m in zip(qo, C):
+#         if C_m.ndim > 1:
+#             util += (o_m * C_m[t]).sum()
+#         else:
+#             util += (o_m * C_m).sum()
+    
+#     return util
+
+# --- compute_expected_state function (using jnp.einsum) ---
+def compute_expected_state(qs_prior: List[jnp.ndarray],
+                           B: List[jnp.ndarray],
+                           u_t: jnp.ndarray,
+                           B_dependencies: List[List[int]] = None) -> List[jnp.ndarray]:
+    """
+    Compute posterior over next state, given belief about previous state,
+    transition model and action, using jnp.einsum.
+    Handles both batched and unbatched inputs.
+    Assumes simple B_dependencies like [[0], [1], ...].
+    """
+    num_factors = len(B)
+    if B_dependencies is None:
+        B_dependencies = [[f] for f in range(num_factors)]
+
+    action_len = u_t.shape[-1] if hasattr(u_t, 'shape') and u_t.ndim > 0 else (len(u_t) if isinstance(u_t, (list, tuple)) else 0)
+    assert action_len == num_factors, f"Length of action u_t ({action_len}) must match number of factors ({num_factors})"
+
+    has_batch_dim = hasattr(qs_prior[0], 'ndim') and qs_prior[0].ndim > 1
+
+    qs_next = []
+    for f in range(num_factors):
+        B_f = B[f]
+        deps = B_dependencies[f]
+        u_f = u_t[..., f].astype(int) # Action for this factor
+
+        # Select the transition matrix slice M
+        if has_batch_dim:
+            batch_idx = jnp.arange(B_f.shape[0])
+            idx_list = [batch_idx] + [slice(None)] * (B_f.ndim - 2) + [u_f]
+            M = B_f[tuple(idx_list)] # Shape: (batch, S_next, S_dep1...)
+        else:
+            M = B_f[..., u_f] # Shape: (S_next, S_dep1...)
+
+        # Perform contraction using jnp.einsum (assuming simple dependency)
+        if len(deps) == 1 and deps[0] == f:
+            qs_f_prior = qs_prior[f] # Shape: (batch?, S_depF)
+
+            if has_batch_dim:
+                einsum_str = '...ik,...k->...i'
+                qs_next_f = jnp.einsum(einsum_str, M, qs_f_prior, optimize='optimal')
+            else:
+                einsum_str = 'ik,k->i'
+                qs_next_f = jnp.einsum(einsum_str, M, qs_f_prior, optimize='optimal')
+        else:
+            # Fallback or error for complex dependencies
+             raise NotImplementedError(f"Einsum/Manual contraction in compute_expected_state currently only supports simple dependencies B_dep[f]=[f]. Got {deps} for factor {f}")
+
+        qs_next.append(qs_next_f)
+
     return qs_next
 
-def compute_expected_state_and_Bs(qs_prior, B, u_t): 
+# --- Corrected compute_expected_obs function (Manual Contraction) ---
+def compute_expected_obs(qs: List[jnp.ndarray],
+                         A: List[jnp.ndarray],
+                         A_dependencies: List[List[int]]) -> List[jnp.ndarray]:
     """
-    Compute posterior over next state, given belief about previous state, transition model and action...
+    Compute the expected observations using manual broadcasting and summation.
+    Handles factorized likelihoods and batch dimensions.
     """
-    assert len(u_t) == len(B)  
-    qs_next = []
-    Bs = []
-    for qs_f, B_f, u_f in zip(qs_prior, B, u_t):
-        qs_next.append( B_f[..., u_f].dot(qs_f) )
-        Bs.append(B_f[..., u_f])
-    
-    return qs_next, Bs
+    num_modalities = len(A)
+    has_batch_dim = hasattr(qs[0], 'ndim') and qs[0].ndim > 1
+    batch_dim_offset = 1 if has_batch_dim else 0
 
-def compute_expected_obs(qs, A, A_dependencies):
-    """
-    New version of expected observation (computation of Q(o|pi)) that takes into account sparse dependencies between observation
-    modalities and hidden state factors
-    """
-        
-    def compute_expected_obs_modality(A_m, m):
+    qo_pi = []
+    for m in range(num_modalities):
+        A_m = A[m] # Shape: (batch?, No_m, Ns_dep1...)
         deps = A_dependencies[m]
-        relevant_factors = [qs[idx] for idx in deps]
-        return factor_dot(A_m, relevant_factors, keep_dims=(0,))
+        relevant_factors = [qs[idx] for idx in deps] # List of [(batch?, Ns_depX), ...]
 
-    return jtu.tree_map(compute_expected_obs_modality, A, list(range(len(A))))
+        # Compute outer product of relevant state factors
+        # Need to handle batch dimension correctly in outer product
+        if has_batch_dim:
+            # If factors already have batch dim, multidimensional_outer might need adjustment
+            # or we compute outer product per batch item and stack
+            def outer_single_batch(single_qs_list):
+                 # single_qs_list contains unbatched factors for one batch item
+                 return multidimensional_outer(single_qs_list)
 
-def compute_info_gain(qs, qo, A, A_dependencies):
-    """
-    New version of expected information gain that takes into account sparse dependencies between observation modalities and hidden state factors.
-    """
-
-    def compute_info_gain_for_modality(qo_m, A_m, m):
-        H_qo = stable_entropy(qo_m)
-        H_A_m = - stable_xlogx(A_m).sum(0)
-        deps = A_dependencies[m]
-        relevant_factors = [qs[idx] for idx in deps]
-        qs_H_A_m = factor_dot(H_A_m, relevant_factors)
-        return H_qo - qs_H_A_m
-    
-    info_gains_per_modality = jtu.tree_map(compute_info_gain_for_modality, qo, A, list(range(len(A))))
-        
-    return jtu.tree_reduce(lambda x,y: x+y, info_gains_per_modality)
-
-def compute_expected_utility(t, qo, C):
-    
-    util = 0.
-    for o_m, C_m in zip(qo, C):
-        if C_m.ndim > 1:
-            util += (o_m * C_m[t]).sum()
+            # Transpose qs factors to have batch dim first, then apply vmap
+            qs_factors_batched = [q for q in relevant_factors] # List of (batch, Ns)
+            # We expect multidimensional_outer to work on a list of (Ns,) arrays
+            # Let's vmap the outer product function over the batch dimension
+            qs_outer = vmap(outer_single_batch)(qs_factors_batched)
+            # qs_outer shape: (batch, Ns_dep1, Ns_dep2, ...)
         else:
-            util += (o_m * C_m).sum()
-    
-    return util
+            # No batch dimension, compute outer product directly
+            qs_outer = multidimensional_outer(relevant_factors)
+            # qs_outer shape: (Ns_dep1, Ns_dep2, ...)
+
+        # Expand qs_outer for broadcasting against A_m's observation dimension
+        # Insert singleton dimension after batch dim (if present) for No_m
+        qs_outer_expanded = jnp.expand_dims(qs_outer, axis=batch_dim_offset)
+        # Shape: (batch?, 1, Ns_dep1, Ns_dep2, ...)
+
+        # Multiply likelihood by outer product of states
+        # A_m shape: (batch?, No_m, Ns_dep1, ...)
+        # qs_outer_expanded shape: (batch?, 1, Ns_dep1, ...)
+        # Result shape: (batch?, No_m, Ns_dep1, ...)
+        weighted_likelihood = A_m * qs_outer_expanded
+
+        # Sum over all state factor dimensions
+        # State factor dimensions start after batch (if present) and obs dimension
+        sum_axes = tuple(range(batch_dim_offset + 1, A_m.ndim))
+        qo_m = weighted_likelihood.sum(axis=sum_axes)
+        # Final shape: (batch?, No_m)
+
+        qo_pi.append(qo_m)
+
+    return qo_pi
+
+
+# --- Corrected compute_info_gain function (using factor_dot_flex) ---
+# Keep this version as it seemed less problematic than einsum/manual for this specific calculation
+def compute_info_gain(qs: List[jnp.ndarray],
+                      qo: List[jnp.ndarray],
+                      A: List[jnp.ndarray],
+                      A_dependencies: List[List[int]]) -> jnp.ndarray:
+    """
+    Compute expected information gain about hidden states (Bayesian surprise).
+    Handles factorized likelihoods and batch dimensions using factor_dot_flex.
+    """
+    num_modalities = len(A)
+    has_batch_dim = hasattr(qs[0], 'ndim') and qs[0].ndim > 1
+    batch_dim_offset = 1 if has_batch_dim else 0
+
+    H_qo = jtu.tree_reduce(lambda x, y: x + y, jtu.tree_map(stable_entropy, qo))
+
+    E_H_A = 0.0
+    for m in range(num_modalities):
+        A_m = A[m]
+        deps = A_dependencies[m]
+        relevant_factors = [qs[idx] for idx in deps]
+
+        H_A_m = -jnp.sum(xlogy(A_m, jnp.clip(A_m, 1e-16)), axis=batch_dim_offset)
+
+        dims_to_keep = (0,) if has_batch_dim else ()
+        contract_dims_m = tuple(range(batch_dim_offset, H_A_m.ndim))
+
+        if has_batch_dim:
+            dims_for_flex = tuple((0, contract_dims_m[i]) for i in range(len(relevant_factors)))
+        else:
+            dims_for_flex = tuple((contract_dims_m[i],) for i in range(len(relevant_factors)))
+
+        E_H_A_m = factor_dot_flex(H_A_m, relevant_factors, dims=dims_for_flex, keep_dims=dims_to_keep)
+        E_H_A += E_H_A_m.sum() if has_batch_dim else E_H_A_m # Sum over batch if needed
+
+    return H_qo - E_H_A
+
+# --- Corrected compute_expected_utility function ---
+def compute_expected_utility(t: int,
+                             qo: List[jnp.ndarray],
+                             C: List[jnp.ndarray]) -> jnp.ndarray:
+    """ Computes expected utility E_qo[ln C] """
+    expected_util = 0.
+    num_modalities = len(qo)
+    has_batch_dim = hasattr(qo[0], 'ndim') and qo[0].ndim > 1
+
+    for m in range(num_modalities):
+        qo_m = qo[m]
+        C_m = C[m]
+
+        if C_m is None or C_m.shape[0] == 0: continue
+
+        if C_m.ndim == (qo_m.ndim + 1):
+            C_m_t = C_m[..., t]
+        elif C_m.ndim == qo_m.ndim:
+            C_m_t = C_m
+        elif C_m.ndim == 1 and has_batch_dim:
+            C_m_t = C_m
+        elif C_m.ndim == 2 and not has_batch_dim:
+             C_m_t = C_m[:, t]
+        else:
+             C_m_t = C_m
+
+        lnC_m = log_stable(jnp.clip(C_m_t, a_min=0.0))
+        if hasattr(lnC_m, 'ndim') and hasattr(qo_m, 'ndim') and lnC_m.ndim < qo_m.ndim:
+            lnC_m = jnp.expand_dims(lnC_m, axis=0) if has_batch_dim else lnC_m
+
+        expected_util += jnp.sum(qo_m * lnC_m, axis=-1)
+
+    return expected_util.sum() if has_batch_dim and expected_util.ndim > 0 else expected_util
 
 def calc_pA_info_gain(pA, qo, qs, A_dependencies):
     """
