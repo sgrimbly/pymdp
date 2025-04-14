@@ -567,10 +567,10 @@ class Agent(Module):
         if (rng_key is None) and (self.action_selection == "stochastic"):
             raise ValueError("Please provide a random number generator key to sample actions stochastically")
 
-        print(f"Sampling mode: {self.sampling_mode}")
-        print(f"Action selection method: {self.action_selection}")
-        print(f"q_pi: {q_pi}")
-        print(f"Random key: {rng_key}")
+        # print(f"Sampling mode: {self.sampling_mode}")
+        # print(f"Action selection method: {self.action_selection}")
+        # print(f"q_pi: {q_pi}")
+        # print(f"Random key: {rng_key}")
 
         if self.sampling_mode == "marginal":
             sample_action = partial(
@@ -588,7 +588,7 @@ class Agent(Module):
             )
             action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
 
-        print(f"Sampled action: {action}")
+        # print(f"Sampled action: {action}")
         return action
 
     def _get_default_params(self):

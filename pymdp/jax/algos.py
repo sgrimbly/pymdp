@@ -73,18 +73,18 @@ def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
 
     # Step 1: Compute log likelihoods for each factor
     log_likelihoods = compute_log_likelihood_per_modality(obs, A)
-    print("\n=== Debug: Log Likelihoods ===")
-    print("log_likelihoods structure:", jtu.tree_map(lambda x: type(x), log_likelihoods))
-    print("log_likelihoods shapes:", [ll.shape for ll in log_likelihoods])
+    # print("\n=== Debug: Log Likelihoods ===")
+    # print("log_likelihoods structure:", jtu.tree_map(lambda x: type(x), log_likelihoods))
+    # print("log_likelihoods shapes:", [ll.shape for ll in log_likelihoods])
 
     # Step 2: Map prior to log space and create initial log-posterior
     log_prior = jtu.tree_map(log_stable, prior)
     log_q = jtu.tree_map(jnp.zeros_like, prior)
-    print("\n=== Debug: Log Prior ===")
-    print("log_prior shapes:", [lp.shape for lp in log_prior])
+    # print("\n=== Debug: Log Prior ===")
+    # print("log_prior shapes:", [lp.shape for lp in log_prior])
 
-    print("\n=== Debug: Initial Log Q ===")
-    print("log_q shapes:", [lq.shape for lq in log_q])
+    # print("\n=== Debug: Initial Log Q ===")
+    # print("log_q shapes:", [lq.shape for lq in log_q])
 
     # Step 3: Iterate until convergence
     def scan_fn(carry, t):
@@ -93,18 +93,18 @@ def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
         marginal_ll = all_marginal_log_likelihood(q, log_likelihoods, A_dependencies)
 
         # Debug prints
-        print("marginal_ll shapes before broadcasting:", [ml.shape for ml in marginal_ll])
-        print("log_prior shapes:", [lp.shape for lp in log_prior])
+        # print("marginal_ll shapes before broadcasting:", [ml.shape for ml in marginal_ll])
+        # print("log_prior shapes:", [lp.shape for lp in log_prior])
 
         # Ensure marginal_ll aligns with log_prior
         marginal_ll = jtu.tree_map(
             lambda x, p: jnp.broadcast_to(x, p.shape) if x.ndim < p.ndim else x,
             marginal_ll, log_prior
         )
-        print("marginal_ll shapes after broadcasting:", [ml.shape for ml in marginal_ll])
+        # print("marginal_ll shapes after broadcasting:", [ml.shape for ml in marginal_ll])
 
         log_q = jtu.tree_map(add, marginal_ll, log_prior)
-        print("Updated log_q shapes:", [lq.shape for lq in log_q])
+        # print("Updated log_q shapes:", [lq.shape for lq in log_q])
         return log_q, None
 
 
@@ -113,8 +113,8 @@ def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
 
     # Step 4: Map result to factorised posterior
     qs = jtu.tree_map(nn.softmax, res)
-    print("\n=== Debug: Final QS ===")
-    print("qs shapes:", [qq.shape for qq in qs])
+    # print("\n=== Debug: Final QS ===")
+    # print("qs shapes:", [qq.shape for qq in qs])
     return qs
 
 

@@ -71,7 +71,7 @@ def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
 
         
     if distr_obs:
-        print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
+        # print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
         expanded_obs = jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
         likelihood = (expanded_obs * A_m).sum(axis=0)
     else:
