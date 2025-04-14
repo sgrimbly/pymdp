@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from typing import List, Tuple, Optional
-from functools import partial
+from functools import partial, reduce
 from jax.scipy.special import xlogy
 from jax import lax, jit, vmap, nn
 from jax import random as jr
@@ -257,249 +257,542 @@ def update_posterior_policies(policy_matrix, qs_init, A, B, C, E, pA, pB, A_depe
     
 #     return util
 
-# --- compute_expected_state function (using jnp.einsum) ---
-def compute_expected_state(qs_prior: List[jnp.ndarray],
-                           B: List[jnp.ndarray],
-                           u_t: jnp.ndarray,
-                           B_dependencies: List[List[int]] = None) -> List[jnp.ndarray]:
+# def calc_pA_info_gain(pA, qo, qs, A_dependencies):
+#     """
+#     Compute expected Dirichlet information gain about parameters ``pA`` for a given posterior predictive distribution over observations ``qo`` and states ``qs``.
+
+#     Parameters
+#     ----------
+#     pA: ``numpy.ndarray`` of dtype object
+#         Dirichlet parameters over observation model (same shape as ``A``)
+#     qo: ``list`` of ``numpy.ndarray`` of dtype object
+#         Predictive posterior beliefs over observations; stores the beliefs about
+#         observations expected under the policy at some arbitrary time ``t``
+#     qs: ``list`` of ``numpy.ndarray`` of dtype object
+#         Predictive posterior beliefs over hidden states, stores the beliefs about
+#         hidden states expected under the policy at some arbitrary time ``t``
+
+#     Returns
+#     -------
+#     infogain_pA: float
+#         Surprise (about Dirichlet parameters) expected for the pair of posterior predictive distributions ``qo`` and ``qs``
+#     """
+
+#     def infogain_per_modality(pa_m, qo_m, m):
+#         wa_m = spm_wnorm(pa_m) * (pa_m > 0.)
+#         fd = factor_dot(wa_m, [s for f, s in enumerate(qs) if f in A_dependencies[m]], keep_dims=(0,))[..., None]
+#         return qo_m.dot(fd)
+
+#     pA_infogain_per_modality = jtu.tree_map(
+#         infogain_per_modality, pA, qo, list(range(len(qo)))
+#     )
+    
+#     infogain_pA = jtu.tree_reduce(lambda x, y: x + y, pA_infogain_per_modality)
+#     return infogain_pA.squeeze(-1)
+
+# def calc_pB_info_gain(pB, qs_t, qs_t_minus_1, B_dependencies, u_t_minus_1):
+#     """
+#     Compute expected Dirichlet information gain about parameters ``pB`` under a given policy
+
+#     Parameters
+#     ----------
+#     pB: ``Array`` of dtype object
+#         Dirichlet parameters over transition model (same shape as ``B``)
+#     qs_t: ``list`` of ``Array`` of dtype object
+#         Predictive posterior beliefs over hidden states expected under the policy at time ``t``
+#     qs_t_minus_1: ``list`` of ``Array`` of dtype object
+#         Posterior over hidden states at time ``t-1`` (before receiving observations)
+#     u_t_minus_1: "Array"
+#         Actions in time step t-1 for each factor
+
+#     Returns
+#     -------
+#     infogain_pB: float
+#         Surprise (about Dirichlet parameters) expected under the policy in question
+#     """
+    
+#     wB = lambda pb:  spm_wnorm(pb) * (pb > 0.)
+#     fd = lambda x, i: factor_dot(x, [s for f, s in enumerate(qs_t_minus_1) if f in B_dependencies[i]], keep_dims=(0,))[..., None]
+    
+#     pB_infogain_per_factor = jtu.tree_map(lambda pb, qs, f: qs.dot(fd(wB(pb[..., u_t_minus_1[f]]), f)), pB, qs_t, list(range(len(qs_t))))
+#     infogain_pB = jtu.tree_reduce(lambda x, y: x + y, pB_infogain_per_factor)[0]
+#     return infogain_pB
+
+# --- Helper Function (Ensure this is available) ---
+def _has_leaf_dim(state_tensor, param_tensor):
+     """ Checks if state tensor likely has an extra leading dim compared to param tensor """
+     if param_tensor is None or not hasattr(param_tensor, 'ndim') or param_tensor.ndim == 0:
+          return False
+     if not hasattr(state_tensor, 'ndim'):
+         return False # Cannot compare if state_tensor doesn't have ndim
+     # Simple heuristic: state has more dims than param suggests L dim
+     try:
+         # Base param ndim expects batch + other + state dims
+         # Base state ndim expects batch + state dims
+         # So if state_tensor.ndim > param_tensor.ndim - 1 (account for 'other' like obs dim), L might exist
+         # This is still fragile. Using the simple ndim check for now.
+         return state_tensor.ndim > param_tensor.ndim
+     except:
+         return False # Fallback
+
+def batched_multidimensional_outer(list_of_arrays):
     """
-    Compute posterior over next state, given belief about previous state,
-    transition model and action, using jnp.einsum.
-    Handles both batched and unbatched inputs.
-    Assumes simple B_dependencies like [[0], [1], ...].
+    Calculates the outer product along the last axes of arrays in a list,
+    preserving leading batch dimensions (L?, b).
     """
-    num_factors = len(B)
-    if B_dependencies is None:
-        B_dependencies = [[f] for f in range(num_factors)]
+    if not list_of_arrays:
+        return jnp.array(1.0)
+    if len(list_of_arrays) == 1:
+        return list_of_arrays[0]
+    return reduce(lambda x, y: jnp.einsum('...i,...j->...ij', x, y), list_of_arrays)
 
-    action_len = u_t.shape[-1] if hasattr(u_t, 'shape') and u_t.ndim > 0 else (len(u_t) if isinstance(u_t, (list, tuple)) else 0)
-    assert action_len == num_factors, f"Length of action u_t ({action_len}) must match number of factors ({num_factors})"
-
-    has_batch_dim = hasattr(qs_prior[0], 'ndim') and qs_prior[0].ndim > 1
-
+# --- MODIFIED compute_expected_state ---
+def compute_expected_state(qs_prior, B, u_t, B_dependencies=None):
+    """
+    Compute P(s'|pi), potentially handling Leaf dim L via explicit vmap.
+    Uses explicit vmap over agent batch `b` for core contraction.
+    Replaces *all* inner einsum calls with matmul (@) or reshape+matmul.
+    qs_prior shapes [(L?, b, s_f)], B shapes [(b, s_f', s_deps..., u)]
+    """
+    assert len(u_t) == len(B)
     qs_next = []
-    for f in range(num_factors):
-        B_f = B[f]
-        deps = B_dependencies[f]
-        u_f = u_t[..., f].astype(int) # Action for this factor
 
-        # Select the transition matrix slice M
-        if has_batch_dim:
-            batch_idx = jnp.arange(B_f.shape[0])
-            idx_list = [batch_idx] + [slice(None)] * (B_f.ndim - 2) + [u_f]
-            M = B_f[tuple(idx_list)] # Shape: (batch, S_next, S_dep1...)
-        else:
-            M = B_f[..., u_f] # Shape: (S_next, S_dep1...)
+    param_for_dim_check = B[0] if len(B) > 0 else None
+    # Check if qs_prior[0] exists and has dimensions before checking ndim
+    has_L_dim = False
+    if len(qs_prior) > 0 and hasattr(qs_prior[0], 'ndim'):
+        if param_for_dim_check is not None and hasattr(param_for_dim_check, 'ndim') and param_for_dim_check.ndim > 0:
+             # Simple heuristic: state has more dims than param suggests L dim
+             # This check needs careful validation based on actual param shapes
+             try: # Be robust if param_tensor doesn't have expected dims
+                 has_L_dim = qs_prior[0].ndim > param_for_dim_check.ndim
+             except:
+                 has_L_dim = False # Fallback
+        elif param_for_dim_check is None or not hasattr(param_for_dim_check, 'ndim') or param_for_dim_check.ndim == 0:
+             has_L_dim = qs_prior[0].ndim > 2
 
-        # Perform contraction using jnp.einsum (assuming simple dependency)
-        if len(deps) == 1 and deps[0] == f:
-            qs_f_prior = qs_prior[f] # Shape: (batch?, S_depF)
 
-            if has_batch_dim:
-                einsum_str = '...ik,...k->...i'
-                qs_next_f = jnp.einsum(einsum_str, M, qs_f_prior, optimize='optimal')
-            else:
-                einsum_str = 'ik,k->i'
-                qs_next_f = jnp.einsum(einsum_str, M, qs_f_prior, optimize='optimal')
-        else:
-            # Fallback or error for complex dependencies
-             raise NotImplementedError(f"Einsum/Manual contraction in compute_expected_state currently only supports simple dependencies B_dep[f]=[f]. Got {deps} for factor {f}")
+    for f, (B_f, u_f, deps) in enumerate(zip(B, u_t, B_dependencies)):
+        B_f_u = B_f[..., u_f] # Shape (b, s_f_next, s_deps...)
+
+        if not deps: # Single factor dependency (self dependency, e.g. deps=[0])
+             # This block assumes deps is like [0], not []
+             if not isinstance(deps, list) or len(deps) != 1:
+                  # If deps is truly empty, handle in the `else` block below
+                  # This path is only for single self-dependency
+                   raise ValueError(f"Expected deps=[f] for self-dependency, got: {deps}")
+
+
+             qs_f = qs_prior[f] # Shape (L?, b, s)
+
+             # Define inner operation for a single batch element `b`
+             # Input B_slice shape (S, s), Input q_slice shape (s,) -> Output shape (S,)
+             # Use matmul: B_slice @ q_slice
+             inner_op = lambda B_slice, q_slice: B_slice @ q_slice
+
+             # Vmap the inner op over the agent batch `b` dimension (axis=0)
+             vmapped_op_b = vmap(inner_op, in_axes=(0, 0))
+
+             if has_L_dim:
+                 qs_next_f = vmap(vmapped_op_b, in_axes=(None, 0))(B_f_u, qs_f) # Output (L, b, S)
+             else:
+                 qs_next_f = vmapped_op_b(B_f_u, qs_f) # Output (b, S)
+
+        elif len(deps) > 0: # Multi-factor dependency (e.g. deps = [0, 1])
+             relevant_factors = [qs_prior[idx] for idx in deps] # Shapes [(L?, b, s_dep_i)]
+             qs_joint_deps = batched_multidimensional_outer(relevant_factors) # Shape (L?, b, s...)
+
+             # Define inner operation for a single batch element `b` using reshape + matmul
+             # Input B_slice shape (S, s0, s1...), Input q_slice shape (s0, s1...) -> Output shape (S,)
+             def inner_op_matmul(B_slice, q_slice):
+                  # Flatten state dimensions
+                  S_dim = B_slice.shape[0]
+                  B_flat = B_slice.reshape(S_dim, -1) # Shape (S, s0*s1*...)
+                  q_flat = q_slice.reshape(-1)       # Shape (s0*s1*...,)
+                  return B_flat @ q_flat             # Output shape (S,)
+
+             # Vmap the inner op over the agent batch `b` dimension (axis=0)
+             vmapped_op_b = vmap(inner_op_matmul, in_axes=(0, 0))
+
+             if has_L_dim:
+                 qs_next_f = vmap(vmapped_op_b, in_axes=(None, 0))(B_f_u, qs_joint_deps) # Output (L, b, S)
+             else:
+                 qs_next_f = vmapped_op_b(B_f_u, qs_joint_deps) # Output (b, S)
+        else: # Case where deps = [] -> Factor evolves independently of any state
+             # B_f_u should have shape (b, S)
+             if B_f_u.ndim != 2:
+                  raise ValueError(f"B matrix for independent factor {f} has wrong shape {B_f_u.shape}, expected (b, S)")
+             qs_next_f = B_f_u # Shape (b, S)
+             if has_L_dim:
+                  # Find L dim size from another factor's qs_prior if possible
+                  L_dim = 1
+                  if len(qs_prior)>0 and hasattr(qs_prior[0], 'ndim') and qs_prior[0].ndim > B_f_u.ndim:
+                      L_dim = qs_prior[0].shape[0]
+                  elif len(qs_prior) > 1 and hasattr(qs_prior[1], 'ndim') and qs_prior[1].ndim > B_f_u.ndim: # Check next factor
+                      L_dim = qs_prior[1].shape[0]
+                  else:
+                      print(f"Warning: Could not determine L dimension for broadcasting independent factor {f}")
+
+                  if L_dim > 1:
+                      qs_next_f = jnp.broadcast_to(qs_next_f, (L_dim,) + qs_next_f.shape) # Shape (L, b, S)
+
 
         qs_next.append(qs_next_f)
 
     return qs_next
 
-# --- Corrected compute_expected_obs function (Manual Contraction) ---
-def compute_expected_obs(qs: List[jnp.ndarray],
-                         A: List[jnp.ndarray],
-                         A_dependencies: List[List[int]]) -> List[jnp.ndarray]:
-    """
-    Compute the expected observations using manual broadcasting and summation.
-    Handles factorized likelihoods and batch dimensions.
-    """
-    num_modalities = len(A)
-    has_batch_dim = hasattr(qs[0], 'ndim') and qs[0].ndim > 1
-    batch_dim_offset = 1 if has_batch_dim else 0
 
+# --- MODIFIED compute_expected_obs ---
+def compute_expected_obs(qs_pi, A, A_dependencies):
+    """
+    Calculates P(o|pi), potentially handling Leaf dim L via explicit vmap.
+    Uses explicit vmap over agent batch `b` for core contraction.
+    qs_pi shapes [(L?, b, s_f)], A shapes [(b, o, s_deps...)]
+    """
     qo_pi = []
+    num_modalities = len(A)
+
+    param_for_dim_check = A[0] if len(A) > 0 else None
+    has_L_dim = _has_leaf_dim(qs_pi[0], param_for_dim_check)
+
     for m in range(num_modalities):
-        A_m = A[m] # Shape: (batch?, No_m, Ns_dep1...)
-        deps = A_dependencies[m]
-        relevant_factors = [qs[idx] for idx in deps] # List of [(batch?, Ns_depX), ...]
+        A_m = A[m]
+        dep_indices = A_dependencies[m]
 
-        # Compute outer product of relevant state factors
-        # Need to handle batch dimension correctly in outer product
-        if has_batch_dim:
-            # If factors already have batch dim, multidimensional_outer might need adjustment
-            # or we compute outer product per batch item and stack
-            def outer_single_batch(single_qs_list):
-                 # single_qs_list contains unbatched factors for one batch item
-                 return multidimensional_outer(single_qs_list)
+        if not dep_indices:
+            # State-independent modality: Need P(o) broadcasted to (L?, b, o)
+            # ... (previous broadcasting logic - seems okay) ...
+            n_obs_m = A_m.shape[-1] if hasattr(A_m, 'ndim') and A_m.ndim > 0 else 1
+            target_batch_shape = qs_pi[0].shape[:-1] # (L?, b)
+            target_shape = target_batch_shape + (n_obs_m,) if hasattr(A_m, 'ndim') and A_m.ndim > 0 else target_batch_shape
+            temp_A_m = A_m
+            missing_batch_dims = len(target_batch_shape) - (A_m.ndim - 1 if hasattr(A_m, 'ndim') and A_m.ndim > 0 else 0)
+            if missing_batch_dims > 0 and hasattr(A_m, 'ndim') and A_m.ndim > 0 :
+                 temp_A_m = jnp.expand_dims(A_m, axis=tuple(range(missing_batch_dims)))
+            elif missing_batch_dims > 0 and (not hasattr(A_m, 'ndim') or A_m.ndim == 0):
+                 temp_A_m = A_m
+            try:
+                if not hasattr(A_m, 'ndim') or A_m.ndim == 0:
+                     qo_m = jnp.broadcast_to(temp_A_m, target_batch_shape)
+                     if n_obs_m == 1: qo_m = jnp.expand_dims(qo_m, axis=-1)
+                else:
+                     qo_m = jnp.broadcast_to(temp_A_m, target_shape)
+            except ValueError as e:
+                 print(f"Warning: Broadcasting state-independent modality {m} failed. A_m shape: {A_m.shape}, Target shape: {target_shape}. Error: {e}")
+                 qo_m = temp_A_m
+            qo_pi.append(qo_m)
+            continue
 
-            # Transpose qs factors to have batch dim first, then apply vmap
-            qs_factors_batched = [q for q in relevant_factors] # List of (batch, Ns)
-            # We expect multidimensional_outer to work on a list of (Ns,) arrays
-            # Let's vmap the outer product function over the batch dimension
-            qs_outer = vmap(outer_single_batch)(qs_factors_batched)
-            # qs_outer shape: (batch, Ns_dep1, Ns_dep2, ...)
+        # State-dependent modality
+        qs_factors_m = [qs_pi[f] for f in dep_indices]
+        qs_outer = batched_multidimensional_outer(qs_factors_m) # Shape (L?, b, s...)
+
+        num_state_factors = len(dep_indices)
+        state_subscripts = "abcdefghijklmnopqrstuvwxyz"[:num_state_factors] # s...
+        obs_subscript = "o"
+
+        # Define inner operation for a single batch element `b`
+        # Input A_slice shape (o, s...), Input q_slice shape (s...)
+        # Output shape (o,)
+        einsum_str_single_b = f'{obs_subscript}{state_subscripts},{state_subscripts}->{obs_subscript}'
+        inner_op = lambda A_slice, q_slice: jnp.einsum(einsum_str_single_b, A_slice, q_slice)
+
+        # Vmap the inner op over the agent batch `b` dimension (axis=0)
+        # Inputs A_m shape (b, o, s...), qs_outer shape (b, s...) -> needs adjustment if L present
+        # Output shape (b, o)
+        vmapped_op_b = vmap(inner_op, in_axes=(0, 0))
+
+        if has_L_dim:
+            # Also vmap over the L dimension (axis=0 of qs_outer)
+            # A_m is fixed w.r.t L dim
+            qo_m = vmap(vmapped_op_b, in_axes=(None, 0))(A_m, qs_outer) # Output (L, b, o)
         else:
-            # No batch dimension, compute outer product directly
-            qs_outer = multidimensional_outer(relevant_factors)
-            # qs_outer shape: (Ns_dep1, Ns_dep2, ...)
-
-        # Expand qs_outer for broadcasting against A_m's observation dimension
-        # Insert singleton dimension after batch dim (if present) for No_m
-        qs_outer_expanded = jnp.expand_dims(qs_outer, axis=batch_dim_offset)
-        # Shape: (batch?, 1, Ns_dep1, Ns_dep2, ...)
-
-        # Multiply likelihood by outer product of states
-        # A_m shape: (batch?, No_m, Ns_dep1, ...)
-        # qs_outer_expanded shape: (batch?, 1, Ns_dep1, ...)
-        # Result shape: (batch?, No_m, Ns_dep1, ...)
-        weighted_likelihood = A_m * qs_outer_expanded
-
-        # Sum over all state factor dimensions
-        # State factor dimensions start after batch (if present) and obs dimension
-        sum_axes = tuple(range(batch_dim_offset + 1, A_m.ndim))
-        qo_m = weighted_likelihood.sum(axis=sum_axes)
-        # Final shape: (batch?, No_m)
+            qo_m = vmapped_op_b(A_m, qs_outer) # Output (b, o)
 
         qo_pi.append(qo_m)
 
     return qo_pi
 
 
-# --- Corrected compute_info_gain function (using factor_dot_flex) ---
-# Keep this version as it seemed less problematic than einsum/manual for this specific calculation
-def compute_info_gain(qs: List[jnp.ndarray],
-                      qo: List[jnp.ndarray],
-                      A: List[jnp.ndarray],
-                      A_dependencies: List[List[int]]) -> jnp.ndarray:
+# --- MODIFIED compute_info_gain ---
+def compute_info_gain(qs, qo, A, A_dependencies):
     """
-    Compute expected information gain about hidden states (Bayesian surprise).
-    Handles factorized likelihoods and batch dimensions using factor_dot_flex.
+    Compute expected information gain EIG = H[P(o|pi)] - E_qs[H[P(o|s)]].
+    Handles potential Leaf dim L via explicit vmap over agent batch `b` and L dim.
+    Sums over L and b dims at the end to return scalar EFE component.
     """
-    num_modalities = len(A)
-    has_batch_dim = hasattr(qs[0], 'ndim') and qs[0].ndim > 1
-    batch_dim_offset = 1 if has_batch_dim else 0
+    # Check leaf dim presence (heuristic using first state factor and first A matrix)
+    param_for_dim_check = A[0] if len(A) > 0 else None
+    has_L_dim = False
+    if len(qs) > 0 and hasattr(qs[0], 'ndim'):
+        if param_for_dim_check is not None and hasattr(param_for_dim_check, 'ndim') and param_for_dim_check.ndim > 0:
+             try: has_L_dim = qs[0].ndim > param_for_dim_check.ndim
+             except: has_L_dim = False # Fallback
+        elif param_for_dim_check is None or not hasattr(param_for_dim_check, 'ndim') or param_for_dim_check.ndim == 0:
+             # If no param or param is scalar, assume L dim if state has > 2 dims (b + s)
+             has_L_dim = qs[0].ndim > 2
 
-    H_qo = jtu.tree_reduce(lambda x, y: x + y, jtu.tree_map(stable_entropy, qo))
+    def compute_info_gain_for_modality(qo_m, A_m, m):
+        # qo_m shape (L?, b, o)
 
-    E_H_A = 0.0
-    for m in range(num_modalities):
-        A_m = A[m]
-        deps = A_dependencies[m]
-        relevant_factors = [qs[idx] for idx in deps]
-
-        H_A_m = -jnp.sum(xlogy(A_m, jnp.clip(A_m, 1e-16)), axis=batch_dim_offset)
-
-        dims_to_keep = (0,) if has_batch_dim else ()
-        contract_dims_m = tuple(range(batch_dim_offset, H_A_m.ndim))
-
-        if has_batch_dim:
-            dims_for_flex = tuple((0, contract_dims_m[i]) for i in range(len(relevant_factors)))
+        # --- Calculate H[P(o|pi)] = H_qo ---
+        # Calculate entropy per L?, b element by vmapping stable_entropy
+        # Assuming stable_entropy works on 1D array (o,) -> scalar output
+        entropy_1d = stable_entropy # Assign the imported function
+        vmapped_entropy_b = vmap(entropy_1d, in_axes=0) # Maps over b: Input (b, o) -> Output (b,)
+        if has_L_dim:
+            vmapped_entropy_Lb = vmap(vmapped_entropy_b, in_axes=0) # Maps over L: Input (L, b, o) -> Output (L, b)
+            H_qo_Lb = vmapped_entropy_Lb(qo_m)
         else:
-            dims_for_flex = tuple((contract_dims_m[i],) for i in range(len(relevant_factors)))
+            H_qo_Lb = vmapped_entropy_b(qo_m) # Output (b,)
 
-        E_H_A_m = factor_dot_flex(H_A_m, relevant_factors, dims=dims_for_flex, keep_dims=dims_to_keep)
-        E_H_A += E_H_A_m.sum() if has_batch_dim else E_H_A_m # Sum over batch if needed
-
-    return H_qo - E_H_A
-
-# --- Corrected compute_expected_utility function ---
-def compute_expected_utility(t: int,
-                             qo: List[jnp.ndarray],
-                             C: List[jnp.ndarray]) -> jnp.ndarray:
-    """ Computes expected utility E_qo[ln C] """
-    expected_util = 0.
-    num_modalities = len(qo)
-    has_batch_dim = hasattr(qo[0], 'ndim') and qo[0].ndim > 1
-
-    for m in range(num_modalities):
-        qo_m = qo[m]
-        C_m = C[m]
-
-        if C_m is None or C_m.shape[0] == 0: continue
-
-        if C_m.ndim == (qo_m.ndim + 1):
-            C_m_t = C_m[..., t]
-        elif C_m.ndim == qo_m.ndim:
-            C_m_t = C_m
-        elif C_m.ndim == 1 and has_batch_dim:
-            C_m_t = C_m
-        elif C_m.ndim == 2 and not has_batch_dim:
-             C_m_t = C_m[:, t]
+        # --- Calculate E_qs[H[P(o|s)]] = expected_H_A ---
+        # Check if A_m is valid for calculating conditional entropy
+        if not hasattr(A_m, 'ndim') or A_m.ndim <= 1:
+            # If A_m is scalar or just (o,), P(o|s) = P(o). E[H(o|s)] = H(o) = H_qo. Info gain is zero.
+            expected_H_A = H_qo_Lb # Set expected_H_A equal to H_qo to yield zero IG
         else:
-             C_m_t = C_m
+            # H_A_m_orig = - sum_o A(o|s) log A(o|s) -- Calculated per state s
+            obs_axis = 1 # Axis of observation dimension in A_m (b, o, s...)
+            H_A_m_orig = - stable_xlogx(A_m).sum(axis=obs_axis) # Shape (b, s...) or (b,)
 
-        lnC_m = log_stable(jnp.clip(C_m_t, a_min=0.0))
-        if hasattr(lnC_m, 'ndim') and hasattr(qo_m, 'ndim') and lnC_m.ndim < qo_m.ndim:
-            lnC_m = jnp.expand_dims(lnC_m, axis=0) if has_batch_dim else lnC_m
+            deps = A_dependencies[m]
+            if not deps: # State-independent (A_m was (b, o) or similar)
+                expected_H_A = H_A_m_orig # Shape (b,)
+                # Broadcast to match H_qo_Lb shape (L?, b) if L is present
+                if has_L_dim and expected_H_A.ndim < H_qo_Lb.ndim:
+                     expected_H_A = jnp.expand_dims(expected_H_A, axis=0) # Add L dim
+                # Ensure shape matches H_qo via broadcasting (handles L=1 vs L>1)
+                if expected_H_A.shape != H_qo_Lb.shape:
+                     expected_H_A = jnp.broadcast_to(expected_H_A, H_qo_Lb.shape)
+            else: # State-dependent calculation
+                 relevant_factors = [qs[idx] for idx in deps] # Shapes [(L?, b, s_i)]
+                 qs_joint_deps = batched_multidimensional_outer(relevant_factors) # Shape (L?, b, s...)
 
-        expected_util += jnp.sum(qo_m * lnC_m, axis=-1)
+                 num_state_factors = len(deps)
+                 state_subscripts = "abcdefghijklmnopqrstuvwxyz"[:num_state_factors] # s...
 
-    return expected_util.sum() if has_batch_dim and expected_util.ndim > 0 else expected_util
+                 # Inner op for single batch element `b`: E_q(s)[ H(o|s) ] = sum_s q(s)H(o|s)
+                 # Input H_slice shape (s...), Input q_slice shape (s...) -> Output scalar
+                 einsum_str_single_b = f'{state_subscripts},{state_subscripts}->'
+                 inner_op = lambda H_slice, q_slice: jnp.einsum(einsum_str_single_b, H_slice, q_slice)
 
+                 # Vmap over b dim
+                 vmapped_op_b = vmap(inner_op, in_axes=(0, 0)) # Input (b, s...), (b, s...) -> Output (b,)
+
+                 if has_L_dim:
+                     # Vmap over L dim of qs_joint_deps, H_A_m_orig is fixed w.r.t L
+                     expected_H_A = vmap(vmapped_op_b, in_axes=(None, 0))(H_A_m_orig, qs_joint_deps) # Output (L, b)
+                 else:
+                     expected_H_A = vmapped_op_b(H_A_m_orig, qs_joint_deps) # Output (b,)
+
+        # --- Calculate Info Gain = H_qo - expected_H_A ---
+        # Ensure shapes match before subtraction
+        if expected_H_A.shape != H_qo_Lb.shape:
+            try:
+                # Attempt broadcasting one last time
+                expected_H_A = jnp.broadcast_to(expected_H_A, H_qo_Lb.shape)
+                print(f"Note: Broadcasted expected_H_A from {expected_H_A.shape} to {H_qo_Lb.shape} in modality {m}")
+            except ValueError:
+                # If broadcasting fails, shapes are fundamentally incompatible. Log error, return 0.
+                print(f"ERROR: Could not broadcast expected_H_A ({expected_H_A.shape}) to H_qo_Lb ({H_qo_Lb.shape}) in modality {m}. Returning zero IG for this modality.")
+                return jnp.zeros_like(H_qo_Lb) # Return zeros of the correct batch shape
+
+        return H_qo_Lb - expected_H_A
+
+    # Calculate info gain per modality (each resulting in shape (L?, b))
+    info_gains_per_modality = jtu.tree_map(compute_info_gain_for_modality, qo, A, list(range(len(A))))
+
+    # Sum info gains across modalities --> shape (L?, b)
+    total_info_gain_Lb = jtu.tree_reduce(lambda x,y: x+y, info_gains_per_modality)
+
+    # Return sum over L?, b dimensions -> scalar
+    return total_info_gain_Lb.sum()
+
+
+# --- MODIFIED compute_expected_utility ---
+def compute_expected_utility(t, qo, C):
+    """
+    Computes expected utility E[U] = sum_{o} P(o|pi) * C(o).
+    Handles qo with shape (L?, b, o) and C with various shapes (b, T?, o), (b, o), (o,), scalar.
+    Uses einsum directly for batch dimension b, and vmap for leaf dimension L if present.
+    """
+    util = 0.
+    # Check leaf dim presence from first qo modality
+    has_L_dim = qo[0].ndim > 2 # Assumes qo[f] is at least (b, o)
+
+    for m, (o_m, C_m) in enumerate(zip(qo, C)):
+        # o_m shape (L?, b, o)
+
+        # Determine C_m_t for the current timestep t
+        C_m_t = C_m
+        C_has_b_dim = False # Flag if C has agent batch dimension
+        if hasattr(C_m, 'ndim'):
+             if C_m.ndim == 3: # Shape (b, T, o)
+                 C_m_t = C_m[:, t, :] # Shape (b, o)
+                 C_has_b_dim = True
+             elif C_m.ndim == 2: # Shape (b, o)
+                 C_m_t = C_m # Shape (b, o)
+                 C_has_b_dim = True
+             elif C_m.ndim == 1: # Shape (o,)
+                 C_m_t = C_m
+             elif C_m.ndim == 0: # Scalar
+                 C_m_t = C_m
+             else:
+                 raise ValueError(f"Utility C_m shape {C_m.shape} unsupported")
+        else: # Scalar
+            C_m_t = C_m
+
+        # Define the utility calculation for a single L-slice (operating on b dim)
+        # Input: o_m_slice shape (b, o), C_m_t shape (b, o) or (o,) or scalar
+        # Output: util_slice shape (b,)
+        def utility_op_for_b_dim(o_m_slice, C_m_t_arg):
+            if hasattr(C_m_t_arg, 'ndim') and C_m_t_arg.ndim >= 2 and C_has_b_dim: # C is (b, o)
+                # einsum: o_m(b,o), C_m_t(b,o) -> util(b,)
+                return jnp.einsum('bo,bo->b', o_m_slice, C_m_t_arg)
+            elif hasattr(C_m_t_arg, 'ndim') and C_m_t_arg.ndim == 1: # C is (o,)
+                # einsum: o_m(b,o), C_m_t(o,) -> util(b,)
+                return jnp.einsum('bo,o->b', o_m_slice, C_m_t_arg)
+            else: # C is scalar
+                return o_m_slice.sum(axis=-1) * C_m_t_arg # Shape (b,)
+
+        # Apply the operation over L?, b dimensions
+        if has_L_dim:
+             # Vmap the b-dimension operation over the L dimension (axis 0 of o_m)
+             # C_m_t needs to be handled correctly based on whether it has b dim
+             if C_has_b_dim:
+                 # Map over o_m (L, b, o) and C_m_t (b, o) - C_m_t is fixed for L vmap
+                 util_m_Lb = vmap(utility_op_for_b_dim, in_axes=(0, None))(o_m, C_m_t) # Output (L, b)
+             else:
+                 # Map over o_m (L, b, o), C_m_t ((o,) or scalar) is fixed
+                 util_m_Lb = vmap(utility_op_for_b_dim, in_axes=(0, None))(o_m, C_m_t) # Output (L, b)
+        else: # No L dim
+             # Apply directly to the b dimension
+             util_m_Lb = utility_op_for_b_dim(o_m, C_m_t) # Output (b,)
+
+        util += util_m_Lb.sum() # Sum over L?, b dims
+
+    return util
+
+
+# --- MODIFIED calc_pA_info_gain ---
 def calc_pA_info_gain(pA, qo, qs, A_dependencies):
-    """
-    Compute expected Dirichlet information gain about parameters ``pA`` for a given posterior predictive distribution over observations ``qo`` and states ``qs``.
-
-    Parameters
-    ----------
-    pA: ``numpy.ndarray`` of dtype object
-        Dirichlet parameters over observation model (same shape as ``A``)
-    qo: ``list`` of ``numpy.ndarray`` of dtype object
-        Predictive posterior beliefs over observations; stores the beliefs about
-        observations expected under the policy at some arbitrary time ``t``
-    qs: ``list`` of ``numpy.ndarray`` of dtype object
-        Predictive posterior beliefs over hidden states, stores the beliefs about
-        hidden states expected under the policy at some arbitrary time ``t``
-
-    Returns
-    -------
-    infogain_pA: float
-        Surprise (about Dirichlet parameters) expected for the pair of posterior predictive distributions ``qo`` and ``qs``
-    """
+    """ Compute EIG about pA, using explicit vmap over agent batch `b`. """
+    param_for_dim_check = pA[0] if len(pA) > 0 else None
+    has_L_dim = _has_leaf_dim(qs[0], param_for_dim_check)
 
     def infogain_per_modality(pa_m, qo_m, m):
-        wa_m = spm_wnorm(pa_m) * (pa_m > 0.)
-        fd = factor_dot(wa_m, [s for f, s in enumerate(qs) if f in A_dependencies[m]], keep_dims=(0,))[..., None]
-        return qo_m.dot(fd)
+        # pa_m shape (b, o, s...) | qo_m shape (L?, b, o)
+        if not hasattr(pa_m, 'ndim') or pa_m.ndim <= 1: return 0.0
 
-    pA_infogain_per_modality = jtu.tree_map(
-        infogain_per_modality, pA, qo, list(range(len(qo)))
-    )
-    
+        wa_m = spm_wnorm(pa_m) * (pa_m > 0.) # Shape (b, o, s...)
+
+        deps = A_dependencies[m]
+        if not deps: return 0.0
+
+        relevant_factors = [qs[idx] for idx in deps] # Shapes [(L?, b, s_i)]
+        qs_joint_deps = batched_multidimensional_outer(relevant_factors) # Shape (L?, b, s...)
+
+        num_state_factors = len(deps)
+        state_subscripts = "abcdefghijklmnopqrstuvwxyz"[:num_state_factors] # s...
+        obs_subscript = "o"
+
+        # Calculate fd = E_qs[wnorm(pA)] per batch element b
+        # Inner op for single b: inputs wa_slice(o,s...), q_slice(s...) -> output (o,)
+        einsum_str_fd_single_b = f'{obs_subscript}{state_subscripts},{state_subscripts}->{obs_subscript}'
+        inner_op_fd = lambda wa_slice, q_slice: jnp.einsum(einsum_str_fd_single_b, wa_slice, q_slice)
+        vmapped_op_fd_b = vmap(inner_op_fd, in_axes=(0, 0)) # Map over b
+
+        # Apply over L?, b
+        if has_L_dim:
+             fd = vmap(vmapped_op_fd_b, in_axes=(None, 0))(wa_m, qs_joint_deps) # Output (L, b, o)
+        else:
+             fd = vmapped_op_fd_b(wa_m, qs_joint_deps) # Output (b, o)
+
+        # Final contraction: E_qo[ fd ]
+        # Inner op for single b: inputs qo_slice(o,), fd_slice(o,) -> output scalar
+        einsum_str_final_single_b = f'{obs_subscript},{obs_subscript}->'
+        inner_op_final = lambda qo_slice, fd_slice: jnp.einsum(einsum_str_final_single_b, qo_slice, fd_slice)
+        vmapped_op_final_b = vmap(inner_op_final, in_axes=(0, 0)) # Map over b
+
+        # Apply over L?, b
+        if has_L_dim:
+             infogain_m_Lb = vmap(vmapped_op_final_b, in_axes=(0, 0))(qo_m, fd) # Output (L, b)
+        else:
+             infogain_m_Lb = vmapped_op_final_b(qo_m, fd) # Output (b,)
+
+        return infogain_m_Lb.sum() # Sum over L?, b
+
+    pA_infogain_per_modality = jtu.tree_map(infogain_per_modality, pA, qo, list(range(len(qo))))
     infogain_pA = jtu.tree_reduce(lambda x, y: x + y, pA_infogain_per_modality)
-    return infogain_pA.squeeze(-1)
+    return infogain_pA
 
+
+# --- MODIFIED calc_pB_info_gain ---
 def calc_pB_info_gain(pB, qs_t, qs_t_minus_1, B_dependencies, u_t_minus_1):
-    """
-    Compute expected Dirichlet information gain about parameters ``pB`` under a given policy
+    """ Compute EIG about pB, using explicit vmap over agent batch `b`. """
+    param_for_dim_check = pB[0] if len(pB) > 0 else None
+    has_L_dim = _has_leaf_dim(qs_t[0], param_for_dim_check)
 
-    Parameters
-    ----------
-    pB: ``Array`` of dtype object
-        Dirichlet parameters over transition model (same shape as ``B``)
-    qs_t: ``list`` of ``Array`` of dtype object
-        Predictive posterior beliefs over hidden states expected under the policy at time ``t``
-    qs_t_minus_1: ``list`` of ``Array`` of dtype object
-        Posterior over hidden states at time ``t-1`` (before receiving observations)
-    u_t_minus_1: "Array"
-        Actions in time step t-1 for each factor
+    def wB_fn(pb):
+        # Add check for zero variance/division by zero if needed by spm_wnorm
+        return spm_wnorm(pb) * (pb > 0.)
 
-    Returns
-    -------
-    infogain_pB: float
-        Surprise (about Dirichlet parameters) expected under the policy in question
-    """
-    
-    wB = lambda pb:  spm_wnorm(pb) * (pb > 0.)
-    fd = lambda x, i: factor_dot(x, [s for f, s in enumerate(qs_t_minus_1) if f in B_dependencies[i]], keep_dims=(0,))[..., None]
-    
-    pB_infogain_per_factor = jtu.tree_map(lambda pb, qs, f: qs.dot(fd(wB(pb[..., u_t_minus_1[f]]), f)), pB, qs_t, list(range(len(qs_t))))
-    infogain_pB = jtu.tree_reduce(lambda x, y: x + y, pB_infogain_per_factor)[0]
+    def infogain_per_factor(pb_f, qs_f_t, f):
+        # pb_f shape (b, S, s..., u) | qs_f_t shape (L?, b, S)
+        if not hasattr(pb_f, 'ndim') or pb_f.ndim <= 2: return 0.0
+
+        u_f = u_t_minus_1[f]
+        deps = B_dependencies[f]
+
+        pb_f_u = pb_f[..., u_f] # Shape (b, S, s...)
+        wB_f_u = wB_fn(pb_f_u) # Shape (b, S, s...)
+
+        num_state_deps = len(deps) if deps else 1
+        state_subscripts = "abcdefghijklmnopqrstuvwxyz"[:num_state_deps] # s...
+        next_state_subscript = "S"
+
+        # Calculate fd = E_qs_tm1[wnorm(pB)] per batch element b
+        # Inner op for single b: inputs wB_slice(S,s...), q_slice(s...) -> output (S,)
+        einsum_str_fd_single_b = f'{next_state_subscript}{state_subscripts},{state_subscripts}->{next_state_subscript}'
+        inner_op_fd = lambda wB_slice, q_slice: jnp.einsum(einsum_str_fd_single_b, wB_slice, q_slice)
+        vmapped_op_fd_b = vmap(inner_op_fd, in_axes=(0, 0)) # Map over b
+
+        # Apply over L?, b
+        if not deps: # Factor depends only on itself
+            qs_f_tm1 = qs_t_minus_1[f] # Shape (L?, b, s)
+            if has_L_dim:
+                fd = vmap(vmapped_op_fd_b, in_axes=(None, 0))(wB_f_u, qs_f_tm1) # Output (L, b, S)
+            else:
+                fd = vmapped_op_fd_b(wB_f_u, qs_f_tm1) # Output (b, S)
+        else: # Factor depends on multiple factors
+            relevant_factors_tm1 = [qs_t_minus_1[idx] for idx in deps]
+            qs_joint_deps_tm1 = batched_multidimensional_outer(relevant_factors_tm1) # Shape (L?, b, s...)
+            if has_L_dim:
+                fd = vmap(vmapped_op_fd_b, in_axes=(None, 0))(wB_f_u, qs_joint_deps_tm1) # Output (L, b, S)
+            else:
+                fd = vmapped_op_fd_b(wB_f_u, qs_joint_deps_tm1) # Output (b, S)
+
+        # Final contraction: E_qs_t[ fd ]
+        # Inner op for single b: inputs q_t_slice(S,), fd_slice(S,) -> output scalar
+        einsum_str_final_single_b = f'{next_state_subscript},{next_state_subscript}->'
+        inner_op_final = lambda q_t_slice, fd_slice: jnp.einsum(einsum_str_final_single_b, q_t_slice, fd_slice)
+        vmapped_op_final_b = vmap(inner_op_final, in_axes=(0, 0)) # Map over b
+
+        # Apply over L?, b
+        if has_L_dim:
+            infogain_f_Lb = vmap(vmapped_op_final_b, in_axes=(0, 0))(qs_f_t, fd) # Output (L, b)
+        else:
+            infogain_f_Lb = vmapped_op_final_b(qs_f_t, fd) # Output (b,)
+
+        return infogain_f_Lb.sum() # Sum over L?, b
+
+    pB_infogain_per_factor = jtu.tree_map(infogain_per_factor, pB, qs_t, list(range(len(qs_t))))
+    infogain_pB = jtu.tree_reduce(lambda x, y: x + y, pB_infogain_per_factor)
     return infogain_pB
+
+
+
 
 def compute_G_policy(qs_init, A, B, C, pA, pB, A_dependencies, B_dependencies, policy_i, use_utility=True, use_states_info_gain=True, use_param_info_gain=False):
     """ Write a version of compute_G_policy that does the same computations as `compute_G_policy` but using `lax.scan` instead of a for loop. """

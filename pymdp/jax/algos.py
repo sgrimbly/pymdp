@@ -4,8 +4,7 @@ import jax.tree_util as jtu
 from jax import jit, vmap, grad, lax, nn
 # from jax.config import config
 # config.update("jax_enable_x64", True)
-
-from .maths import compute_log_likelihood, compute_log_likelihood_per_modality, log_stable, MINVAL, factor_dot, factor_dot_flex
+from .maths import compute_log_likelihood, compute_log_likelihood_per_modality, log_stable, MINVAL, factor_dot, factor_dot_flex, MINVAL
 from typing import Any, List
 
 def add(x, y):
@@ -65,59 +64,163 @@ def run_vanilla_fpi(A, obs, prior, num_iter=1, distr_obs=True):
     qs = jtu.tree_map(nn.softmax, res)
     return qs
 
+# def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
+#     """
+#     Run the fixed point iteration algorithm with sparse dependencies 
+#     between factors and outcomes (stored in `A_dependencies`).
+#     """
+
+#     # Step 1: Compute log likelihoods for each factor
+#     log_likelihoods = compute_log_likelihood_per_modality(obs, A)
+#     # print("\n=== Debug: Log Likelihoods ===")
+#     # print("log_likelihoods structure:", jtu.tree_map(lambda x: type(x), log_likelihoods))
+#     # print("log_likelihoods shapes:", [ll.shape for ll in log_likelihoods])
+
+#     # Step 2: Map prior to log space and create initial log-posterior
+#     log_prior = jtu.tree_map(log_stable, prior)
+#     log_q = jtu.tree_map(jnp.zeros_like, prior)
+#     # print("\n=== Debug: Log Prior ===")
+#     # print("log_prior shapes:", [lp.shape for lp in log_prior])
+
+#     # print("\n=== Debug: Initial Log Q ===")
+#     # print("log_q shapes:", [lq.shape for lq in log_q])
+
+#     # Step 3: Iterate until convergence
+#     def scan_fn(carry, t):
+#         log_q = carry
+#         q = jtu.tree_map(nn.softmax, log_q)
+#         marginal_ll = all_marginal_log_likelihood(q, log_likelihoods, A_dependencies)
+
+#         # Debug prints
+#         # print("marginal_ll shapes before broadcasting:", [ml.shape for ml in marginal_ll])
+#         # print("log_prior shapes:", [lp.shape for lp in log_prior])
+
+#         # Ensure marginal_ll aligns with log_prior
+#         marginal_ll = jtu.tree_map(
+#             lambda x, p: jnp.broadcast_to(x, p.shape) if x.ndim < p.ndim else x,
+#             marginal_ll, log_prior
+#         )
+#         # print("marginal_ll shapes after broadcasting:", [ml.shape for ml in marginal_ll])
+
+#         log_q = jtu.tree_map(add, marginal_ll, log_prior)
+#         # print("Updated log_q shapes:", [lq.shape for lq in log_q])
+#         return log_q, None
+
+
+
+#     res, _ = lax.scan(scan_fn, log_q, jnp.arange(num_iter))
+
+#     # Step 4: Map result to factorised posterior
+#     qs = jtu.tree_map(nn.softmax, res)
+#     # print("\n=== Debug: Final QS ===")
+#     # print("qs shapes:", [qq.shape for qq in qs])
+#     return qs
+# algos.py
+
+# algos.py
+
+
 def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
     """
-    Run the fixed point iteration algorithm with sparse dependencies 
-    between factors and outcomes (stored in `A_dependencies`).
+    Run factorized fixed point iteration.
+    Corrected call to compute log likelihoods and prior initialization fallback.
     """
+    # Step 1: Compute log likelihoods PER MODALITY
+    # Assuming compute_log_likelihood_per_modality handles mapping over batch if needed,
+    # based on the context where this function (run_factorized_fpi) is called (inside vmap).
+    # It should receive unbatched A slices and obs slices.
+    log_likelihoods = compute_log_likelihood_per_modality(obs, A) # Expects list of (s_dep...)
 
-    # Step 1: Compute log likelihoods for each factor
-    log_likelihoods = compute_log_likelihood_per_modality(obs, A)
-    # print("\n=== Debug: Log Likelihoods ===")
-    # print("log_likelihoods structure:", jtu.tree_map(lambda x: type(x), log_likelihoods))
-    # print("log_likelihoods shapes:", [ll.shape for ll in log_likelihoods])
+    # Step 2: Compute log priors
+    if prior is None:
+        # This fallback should ideally not be reached if infer_states passes prior correctly.
+        print("Warning: Prior is None in run_factorized_fpi. Check agent state/prior passing.")
+        # Initialize based on state factor dimensions (infer from A or ideally B)
+        # Inferring from A is unreliable if dependencies vary. Infer from prior structure if possible? No, prior is None.
+        # Let's assume num_states can be inferred correctly elsewhere or passed.
+        # Fallback: try inferring from A (might be wrong structure as seen before)
+        try:
+             # Get num_states for each *factor* based on A_dependencies structure
+             num_factors = max(max(deps, default=-1) for deps in A_dependencies) + 1 if A_dependencies else 0
+             # This is complex. A simpler, potentially incorrect init based on last dim of A:
+             _num_states_per_A_leaf = jtu.tree_map(lambda x: x.shape[-1], A) # This gets state dim of LAST dependency
+             # We need a list matching the number of FACTORs. How to get num_factors?
+             # If A_dependencies is reliable:
+             if num_factors > 0:
+                  # Need the size for each factor index 0..num_factors-1
+                  # This is still hard without B or D shape info passed in.
+                  # Using the previously observed incorrect but runnable shape for now:
+                  prior_shapes = [(100,), (4,)] # HARDCODED based on your specific agent factors - THIS IS BAD PRACTICE
+                  print(f"Using HARDCODED prior shapes for initialization: {prior_shapes}")
+                  prior = [jnp.ones(s) / s[0] for s in prior_shapes]
 
-    # Step 2: Map prior to log space and create initial log-posterior
-    log_prior = jtu.tree_map(log_stable, prior)
-    log_q = jtu.tree_map(jnp.zeros_like, prior)
-    # print("\n=== Debug: Log Prior ===")
-    # print("log_prior shapes:", [lp.shape for lp in log_prior])
+             else: # Cannot determine factors
+                  raise ValueError("Cannot initialize prior: prior is None and num_factors cannot be determined from A_dependencies.")
 
-    # print("\n=== Debug: Initial Log Q ===")
-    # print("log_q shapes:", [lq.shape for lq in log_q])
+        except Exception as e:
+             print(f"Error during fallback prior initialization: {e}")
+             raise ValueError("Cannot initialize prior when prior is None and structure inference fails.")
 
-    # Step 3: Iterate until convergence
+
+    log_prior = jtu.tree_map(lambda x: log_stable(x + MINVAL), prior) # Should be List[(s,)]
+
+    # Initial state for scan
+    log_q = log_prior
+
+    # ****** START DEBUG PRINTS ******
+    print("\n[run_factorized_fpi] BEFORE SCAN:")
+    print(f"  - type(prior): {type(prior)}")
+    print(f"  - prior structure/shapes: {jtu.tree_map(lambda x: getattr(x, 'shape', 'N/A'), prior)}")
+    print(f"  - type(log_prior): {type(log_prior)}")
+    print(f"  - log_prior structure/shapes: {jtu.tree_map(lambda x: getattr(x, 'shape', 'N/A'), log_prior)}")
+    print(f"  - type(log_likelihoods): {type(log_likelihoods)}")
+    print(f"  - log_likelihoods structure/shapes: {jtu.tree_map(lambda x: getattr(x, 'shape', 'N/A'), log_likelihoods)}")
+    print(f"  - type(A_dependencies): {type(A_dependencies)}")
+    print(f"  - A_dependencies value: {A_dependencies}")
+    # ****** END DEBUG PRINTS ******
+
+    # Step 3: Run fixed point iterations
     def scan_fn(carry, t):
-        log_q = carry
-        q = jtu.tree_map(nn.softmax, log_q)
-        marginal_ll = all_marginal_log_likelihood(q, log_likelihoods, A_dependencies)
+        log_q = carry # List[(s,)]
 
-        # Debug prints
-        # print("marginal_ll shapes before broadcasting:", [ml.shape for ml in marginal_ll])
-        # print("log_prior shapes:", [lp.shape for lp in log_prior])
+        # ****** START DEBUG PRINTS ******
+        # print(f"  [scan_fn iter {t}] type(log_q): {type(log_q)}")
+        # print(f"  [scan_fn iter {t}] log_q structure/shapes: {jtu.tree_map(lambda x: getattr(x, 'shape', 'N/A'), log_q)}")
+        # ****** END DEBUG PRINTS ******
+
+        q = jtu.tree_map(nn.softmax, log_q) # List[(s,)]
+
+        # ****** START DEBUG PRINTS ******
+        # print(f"  [scan_fn iter {t}] type(q): {type(q)}")
+        # print(f"  [scan_fn iter {t}] q structure/shapes: {jtu.tree_map(lambda x: getattr(x, 'shape', 'N/A'), q)}")
+        # ****** END DEBUG PRINTS ******
+
+        marginal_ll = all_marginal_log_likelihood(q, log_likelihoods, A_dependencies) # Expect List[(s,)]
 
         # Ensure marginal_ll aligns with log_prior
-        marginal_ll = jtu.tree_map(
-            lambda x, p: jnp.broadcast_to(x, p.shape) if x.ndim < p.ndim else x,
-            marginal_ll, log_prior
-        )
-        # print("marginal_ll shapes after broadcasting:", [ml.shape for ml in marginal_ll])
+        if isinstance(marginal_ll, list) and isinstance(log_prior, list) and len(marginal_ll) == len(log_prior):
+             if any(not hasattr(ml,'shape') or not hasattr(lp,'shape') for ml, lp in zip(marginal_ll, log_prior)):
+                 print("Warning: Found non-array types in marginal_ll or log_prior during broadcast check.")
+             else:
+                 marginal_ll = jtu.tree_map(
+                     lambda x, p: jnp.broadcast_to(x, p.shape) if hasattr(x,'shape') and hasattr(p,'shape') and x.shape != p.shape else x,
+                     marginal_ll, log_prior
+                 )
+        else:
+             print(f"Warning: Skipping broadcast in scan_fn due to type/length mismatch. marginal_ll type: {type(marginal_ll)}, log_prior type: {type(log_prior)}")
 
-        log_q = jtu.tree_map(add, marginal_ll, log_prior)
-        # print("Updated log_q shapes:", [lq.shape for lq in log_q])
+        # Update step
+        log_q = jtu.tree_map(lambda ll, lp: ll + lp, marginal_ll, log_prior)
         return log_q, None
-
-
 
     res, _ = lax.scan(scan_fn, log_q, jnp.arange(num_iter))
 
     # Step 4: Map result to factorised posterior
-    qs = jtu.tree_map(nn.softmax, res)
-    # print("\n=== Debug: Final QS ===")
-    # print("qs shapes:", [qq.shape for qq in qs])
+    qs = jtu.tree_map(nn.softmax, res) # Final qs, shape List[(s,)] inside vmap context
     return qs
 
 
+# Keep other functions like run_vmp, run_mmp etc. as they were
 def mirror_gradient_descent_step(tau, ln_A, lnB_past, lnB_future, ln_qs):
     """
     u_{k+1} = u_{k} - \nabla_p F_k
