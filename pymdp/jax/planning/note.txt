@@ -1,0 +1,3 @@
+St John 6/1/2025: I took these files from T Verbelen's pymdp repo fork.
+
+https://github.com/infer-actively/pymdp/blob/feature/fast_structure_learning/pymdp/jax/planning/si.py

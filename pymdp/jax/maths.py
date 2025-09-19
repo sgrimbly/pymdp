@@ -62,18 +62,22 @@ def factor_dot_flex(M, xs, dims: List[Tuple[int]], keep_dims: Optional[Tuple[int
     return contract(*args, backend='jax')
 
 def get_likelihood_single_modality(o_m, A_m, distr_obs=True):
-    """Return observation likelihood for a single observation modality m"""
-    # if o_m.ndim == 0:
-    #     # Expand scalar to match the feature dimension
-    #     o_m = jnp.expand_dims(o_m, axis=0)
-    # elif o_m.ndim == 1 and A_m.ndim > 1:
-    #     o_m = jnp.expand_dims(o_m, axis=0)
+    """Return observation likelihood for a single observation modality m
 
-        
+    Shapes (batched):
+    - A_m: (batch, n_obs, s1, s2, ...)
+    - o_m (dist): (batch, n_obs) or (n_obs,)
+
+    When `distr_obs` is True, compute p(o|s) by weighting A_m over the
+    observation categories axis (axis=1). The previous implementation
+    incorrectly summed over axis=0, which is the batch dimension.
+    """
     if distr_obs:
-        # print(f"o_m shape: {o_m.shape}, A_m shape: {A_m.shape}")
-        expanded_obs = jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
-        likelihood = (expanded_obs * A_m).sum(axis=0)
+        # Expand observation distribution across state dimensions
+        # Keep axes: 0=batch, 1=obs; expand 2.. to match A_m
+        expanded_obs = jnp.expand_dims(o_m, tuple(range(2, A_m.ndim))) if o_m.ndim >= 2 else jnp.expand_dims(o_m, tuple(range(1, A_m.ndim)))
+        # Sum over observation categories (axis=1), preserving batch and state dims
+        likelihood = (expanded_obs * A_m).sum(axis=1)
     else:
         likelihood = A_m[o_m]
 
