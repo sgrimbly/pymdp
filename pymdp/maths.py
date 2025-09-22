@@ -2,7 +2,7 @@ import jax.numpy as jnp
 
 from functools import partial
 from typing import Optional, Tuple, List
-from jax import tree_util, nn, jit, vmap, lax
+from jax import tree_util, nn, jit
 from jax.scipy.special import xlogy, digamma
 from opt_einsum import contract
 from multimethod import multimethod
@@ -210,13 +210,13 @@ def spm_wnorm(A, exact_param_info_gain=True):
     return wA
 
 
-def dirichlet_expected_value(dir_arr):
+def dirichlet_expected_value(dir_arr, event_dim=0):
     """
-    Returns Expectation of Dirichlet parameters over a set of
-    Categorical distributions, stored in the columns of A.
+    Returns the expected value of Dirichlet parameters over a set of
+    Categorical distributions, whose event/output dimension is stored in the axis of each array given by event_dim (default is 0).
     """
     dir_arr = jnp.clip(dir_arr, min=MINVAL)
-    expected_val = jnp.divide(dir_arr, dir_arr.sum(axis=0, keepdims=True))
+    expected_val = jnp.divide(dir_arr, dir_arr.sum(axis=event_dim, keepdims=True))
     return expected_val
 
 

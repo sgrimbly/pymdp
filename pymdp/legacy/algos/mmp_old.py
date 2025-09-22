@@ -3,10 +3,8 @@
 # pylint: disable=no-member
 
 import numpy as np
-import sys
-import pathlib
 
-from pymdp.legacy.maths import spm_dot, get_joint_likelihood, spm_norm, softmax, calc_free_energy
+from pymdp.legacy.maths import spm_dot, get_joint_likelihood, spm_norm, softmax
 from pymdp.legacy import utils
 
 
@@ -106,7 +104,7 @@ def run_mmp_old(
     # TODO: needs a better name - the point at which we ignore future messages
     future_cutoff = window_len - 1
     inference_len = window_len + 1
-    obs_seq_len = len(obs_t)
+    len(obs_t)
 
     # get relevant observations, given our current time point
     if curr_t == 0:
@@ -129,7 +127,7 @@ def run_mmp_old(
         num_states = [B[0].shape[0]]
         B = utils.to_obj_array(B)
 
-    num_modalities = len(num_obs)
+    len(num_obs)
     num_factors = len(num_states)
 
     """

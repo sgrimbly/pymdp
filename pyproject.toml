@@ -41,6 +41,11 @@ gpu = [
     'jaxlib[cuda12]>=0.3.4',
 ]
 
+nb = [
+        'mediapy>=1.2.4',
+        'pygraphviz>=1.14',
+    ]
+
 [project.urls]
 Documentation = "https://pymdp-rtd.readthedocs.io/en/stable/"
 Repository = "https://github.com/infer-actively/pymdp"
@@ -60,4 +65,8 @@ packages = [
 pymdp = ['envs/assets/*']
 
 [tool.black]
-line-length = 120
+line-length = 88
+
+[tool.ruff]
+line-length = 88
+lint.ignore = ["E731", "E741", "F401", "E402", "F811"]

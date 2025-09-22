@@ -5,8 +5,8 @@ from jax import jit, vmap, grad, lax, nn
 # from jax.config import config
 # config.update("jax_enable_x64", True)
 
-from pymdp.maths import compute_log_likelihood, compute_log_likelihood_per_modality, log_stable, MINVAL, factor_dot, factor_dot_flex
-from typing import Any, List
+from pymdp.maths import compute_log_likelihood, compute_log_likelihood_per_modality, log_stable, factor_dot, factor_dot_flex
+from typing import List
 
 def add(x, y):
     return x + y
@@ -179,7 +179,7 @@ def variational_filtering_step(prior, Bs, ln_As, A_dependencies):
 def update_variational_filtering(obs, A, B, prior, A_dependencies, **kwargs):
     """Online variational filtering belief update that uses a sparse dependency matrix for A"""
 
-    T = obs[0].shape[0]
+    obs[0].shape[0]
     def pad(x):
         npad = [(0, 0)] * jnp.ndim(x)
         npad[0] = (0, 1)
@@ -355,7 +355,6 @@ if __name__ == "__main__":
     qs = jit(run_vanilla_fpi)(A, obs, prior)
 
     # test if differentiable
-    from functools import partial
 
     def sum_prod(prior):
         qs = jnp.concatenate(run_vanilla_fpi(A, obs, prior))

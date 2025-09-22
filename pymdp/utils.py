@@ -8,7 +8,6 @@ __author__: Conor Heins, Alexander Tschantz, Brennan Klein
 
 import jax
 import jax.numpy as jnp
-import jax.tree_util as jtu
 import numpy as np
 
 import io
@@ -16,13 +15,8 @@ import matplotlib.pyplot as plt
 
 from typing import (
     Any,
-    Callable,
     List,
-    NamedTuple,
-    Optional,
     Sequence,
-    Union,
-    Tuple,
 )
 
 Tensor = Any  # maybe jnp.ndarray, but typing seems not to be well defined for jax
@@ -34,6 +28,25 @@ ShapeList = list[Shape]
 def norm_dist(dist: Tensor) -> Tensor:
     """Normalizes a Categorical probability distribution"""
     return dist / dist.sum(0)
+
+
+def validate_normalization(tensor: Tensor, axis: int = 1, tensor_name: str = "tensor") -> None:
+    """
+    Validates that a probability tensor has normalised distributions along specified axis.
+    It raises a ValueError if tensor has zero-filled distributions or unnormalised distributions
+    """
+    # sum along the specified axis
+    sums = jnp.sum(tensor, axis=axis)
+    
+    # check for zero-filled distributions
+    zero_filled = jnp.any(jnp.isclose(sums, 0.0))
+    if zero_filled:
+        raise ValueError(f"Please ensure that none of the distributions along {tensor_name}'s {axis}-th axis sum to zero...")
+    
+    # check for unnormalised distributions (non-zero but not summing to 1)
+    not_normalised = jnp.any(~jnp.isclose(sums, 1.0))
+    if not_normalised:
+        raise ValueError(f"Please ensure that all distributions along {tensor_name}'s {axis}-th axis are properly normalised and sum to 1...")
 
 
 def list_array_uniform(shape_list: ShapeList) -> Vector:
