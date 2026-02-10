@@ -11,10 +11,49 @@ from typing import Any, List
 def add(x, y):
     return x + y
 
+# def marginal_log_likelihood(qs, log_likelihood, i):
+#     xs = [q for j, q in enumerate(qs) if j != i]
+#     return factor_dot(log_likelihood, xs, keep_dims=(i,))
 def marginal_log_likelihood(qs, log_likelihood, i):
-    xs = [q for j, q in enumerate(qs) if j != i]
-    return factor_dot(log_likelihood, xs, keep_dims=(i,))
+    """ Compute marginal log likelihood for factor i """
+    # i: index of the factor we are computing the marginal for.
+    # log_likelihood: the log P(o_m | s_dep(m)) term, potentially multidimensional.
+    # qs: List of current beliefs over all factors.
 
+    if log_likelihood.ndim == 1:
+        # If log_likelihood is 1D, it likely only depends on one factor.
+        # Assume this factor is factor `i`. The marginal contribution is the term itself.
+        # (Optional check for safety: ensure the dimension matches qs[i])
+        # assert log_likelihood.shape[0] == qs[i].shape[0], "Dimension mismatch"
+        return log_likelihood
+    else:
+        # log_likelihood depends on multiple factors. Sum out factors j != i.
+        # Collect beliefs for factors other than i
+        xs = [q for j, q in enumerate(qs) if j != i]
+
+        # Check if xs is empty (can happen if there's only one factor total)
+        if not xs:
+            # If no other factors to sum out, return the original (should be ndim=1 case?)
+            # This case might indicate an upstream issue if ndim > 1 but no xs.
+            # For robustness, return log_likelihood, but maybe add a warning.
+             print(f"Warning: log_likelihood ndim > 1 but no other factors found in marginal_log_likelihood(i={i})")
+             return log_likelihood
+
+        # Assuming the dimensions of log_likelihood are ordered according to the
+        # original factor indices they depend on, and keep_dims=(i,) correctly
+        # identifies the dimension(s) corresponding to factor i to keep.
+        # Call factor_dot to sum out the dimensions corresponding to factors in xs.
+        try:
+             # We expect factor_dot to handle the assertion correctly now for ndim > 1
+             return factor_dot(log_likelihood, xs, keep_dims=(i,))
+        except ValueError as e:
+             # Add more debug info if factor_dot still fails
+             print(f"Error in factor_dot inside marginal_log_likelihood(i={i}) for multi-dim ll")
+             print(f"  log_likelihood.shape: {log_likelihood.shape}")
+             print(f"  len(xs): {len(xs)}")
+             print(f"  Attempted keep_dims: {(i,)}")
+             raise e
+         
 def all_marginal_log_likelihood(qs, log_likelihoods, all_factor_lists):
     qL_marginals = jtu.tree_map(lambda ll_m, factor_list_m: mll_factors(qs, ll_m, factor_list_m), log_likelihoods, all_factor_lists)
     

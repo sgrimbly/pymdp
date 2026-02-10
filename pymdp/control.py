@@ -351,21 +351,56 @@ def compute_G_policy_inductive(qs_init, A, B, C, pA, pB, A_dependencies, B_depen
     _, neg_G = final_state
     return neg_G
 
-def update_posterior_policies_inductive(policy_matrix, qs_init, A, B, C, E, pA, pB, A_dependencies, B_dependencies, I, gamma=16.0, inductive_epsilon=1e-3, use_utility=True, use_states_info_gain=True, use_param_info_gain=False, use_inductive=True):
-    # policy --> n_levels_factor_f x 1
-    # factor --> n_levels_factor_f x n_policies
-    ## vmap across policies
-    compute_G_fixed_states = partial(compute_G_policy_inductive, qs_init, A, B, C, pA, pB, A_dependencies, B_dependencies, I, inductive_epsilon=inductive_epsilon,
+# def update_posterior_policies_inductive(policy_matrix, qs_init, A, B, C, E, pA, pB, A_dependencies, B_dependencies, I, gamma=16.0, inductive_epsilon=1e-3, use_utility=True, use_states_info_gain=True, use_param_info_gain=False, use_inductive=True):
+#     # policy --> n_levels_factor_f x 1
+#     # factor --> n_levels_factor_f x n_policies
+    
+#     qs_init = jtu.tree_map(lambda x: x[0], qs) # Unbatch -> List[(s,)]
+
+#     ## vmap across policies
+#     compute_G_fixed_states = partial(compute_G_policy_inductive, qs_init, A, B, C, pA, pB, A_dependencies, B_dependencies, I, inductive_epsilon=inductive_epsilon,
+#                                      use_utility=use_utility,  use_states_info_gain=use_states_info_gain, use_param_info_gain=use_param_info_gain, use_inductive=use_inductive)
+
+#     # only in the case of policy-dependent qs_inits
+#     # in_axes_list = (1,) * n_factors
+#     # all_efe_of_policies = vmap(compute_G_policy, in_axes=(in_axes_list, 0))(qs_init_pi, policy_matrix)
+
+#     # policies needs to be an NDarray of shape (n_policies, n_timepoints, n_control_factors)
+#     neg_efe_all_policies = vmap(compute_G_fixed_states)(policy_matrix)
+
+#     return nn.softmax(gamma * neg_efe_all_policies + log_stable(E)), neg_efe_all_policies
+
+def update_posterior_policies_inductive(policy_matrix, qs, A, B, C, E, pA, pB, A_dependencies, B_dependencies, I, gamma=16.0, inductive_epsilon=1e-3, use_utility=True, use_states_info_gain=True, use_param_info_gain=False, use_inductive=True):
+     # This function is called by vmap in Agent.infer_policies
+     # It receives UNBATCHED slices of A, B, C, E, pA, pB, I, gamma, inductive_epsilon
+     # BUT it receives the BATCHED slice of qs (shape (1, s) because original qs was List[(1, s)])
+
+     # <<< ADD UNBATCHING STEP for qs >>>
+     qs_init = jtu.tree_map(lambda x: x[0], qs) # Unbatch -> List[(s,)]
+     # <<< END ADDITION >>>
+
+     # Now use qs_init for the policy rollout calculation
+     compute_G_fixed_states = partial(compute_G_policy_inductive, qs_init, A, B, C, pA, pB, A_dependencies, B_dependencies, I, inductive_epsilon=inductive_epsilon, # Use qs_init
                                      use_utility=use_utility,  use_states_info_gain=use_states_info_gain, use_param_info_gain=use_param_info_gain, use_inductive=use_inductive)
 
-    # only in the case of policy-dependent qs_inits
-    # in_axes_list = (1,) * n_factors
-    # all_efe_of_policies = vmap(compute_G_policy, in_axes=(in_axes_list, 0))(qs_init_pi, policy_matrix)
+     # This vmap maps over policies
+     neg_efe_all_policies = vmap(compute_G_fixed_states)(policy_matrix)
 
-    # policies needs to be an NDarray of shape (n_policies, n_timepoints, n_control_factors)
-    neg_efe_all_policies = vmap(compute_G_fixed_states)(policy_matrix)
+     # Calculate policy posterior (using E which is already unbatched)
+     log_E = log_stable(E) if E is not None else 0.0
+     # Ensure log_E is scalar or broadcastable if E was None
+     if isinstance(log_E, (int, float)) and log_E == 0.0:
+         final_log_prior = log_E # Scalar 0.0
+     elif hasattr(log_E, 'shape') and len(log_E.shape) == 0: # Check if E resulted in scalar log(E)
+         final_log_prior = log_E
+     elif hasattr(log_E, 'shape') and len(log_E.shape) > 0: # If E was array e.g. (num_policies,)
+         final_log_prior = log_E # Already correct shape
+     else:
+         final_log_prior = 0.0 # Fallback
 
-    return nn.softmax(gamma * neg_efe_all_policies + log_stable(E)), neg_efe_all_policies
+     q_pi = nn.softmax(gamma * neg_efe_all_policies + final_log_prior) # Add log prior E here
+
+     return q_pi, neg_efe_all_policies
 
 def generate_I_matrix(H: List[Array], B: List[Array], threshold: float, depth: int):
     """ 

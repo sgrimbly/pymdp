@@ -23,7 +23,8 @@ def update_obs_likelihood_dirichlet_m(pA_m, obs_m, qs, dependencies_m, lr=1.0):
 
     relevant_factors = tree_map(lambda f_idx: qs[f_idx], dependencies_m)
 
-    dfda = vmap(multidimensional_outer)([obs_m] + relevant_factors).sum(axis=0)
+    # dfda = vmap(multidimensional_outer)([obs_m] + relevant_factors).sum(axis=0)
+    dfda = multidimensional_outer([obs_m] + relevant_factors)
 
     new_pA_m = pA_m + lr * dfda
     A_m = dirichlet_expected_value(new_pA_m)

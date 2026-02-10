@@ -440,7 +440,8 @@ class Agent(Module):
             Negative expected free energies of each policy, i.e. a vector containing one negative expected free energy per policy.
         """
 
-        latest_belief = jtu.tree_map(lambda x: x[:, -1], qs) # only get the posterior belief held at the current timepoint
+        # latest_belief = jtu.tree_map(lambda x: x[:, -1], qs) # only get the posterior belief held at the current timepoint
+
         infer_policies = partial(
             control.update_posterior_policies_inductive,
             self.policies,
@@ -453,7 +454,7 @@ class Agent(Module):
         )
 
         q_pi, G = vmap(infer_policies)(
-            latest_belief, 
+            qs, #latest_belief, 
             self.A,
             self.B,
             self.C,
@@ -512,14 +513,40 @@ class Agent(Module):
         if (rng_key is None) and (self.action_selection == "stochastic"):
             raise ValueError("Please provide a random number generator key to sample actions stochastically")
 
+        # Decide which sampling function to use based on mode
         if self.sampling_mode == "marginal":
-            sample_action = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
-            action = vmap(sample_action)(q_pi, alpha=self.alpha, rng_key=rng_key)
+            sampling_fn = partial(control.sample_action, self.policies, self.num_controls, action_selection=self.action_selection)
+            alpha_arg = self.alpha # Pass potentially batched alpha
         elif self.sampling_mode == "full":
-            sample_policy = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
-            action = vmap(sample_policy)(q_pi, alpha=self.alpha, rng_key=rng_key)
+            sampling_fn = partial(control.sample_policy, self.policies, action_selection=self.action_selection)
+            alpha_arg = self.alpha # Pass potentially batched alpha
+        else:
+            raise ValueError(f"Unknown sampling_mode: {self.sampling_mode}")
+
+        # ****** CORRECTED BATCH HANDLING ******
+        is_batched = hasattr(q_pi, 'ndim') and q_pi.ndim > 1 and q_pi.shape[0] > 1
+        is_single_batch_dim = hasattr(q_pi, 'ndim') and q_pi.ndim > 1 and q_pi.shape[0] == 1
+
+        if is_batched: # Batch size > 1
+            # Need a unique key per batch element
+            keys = jr.split(rng_key, self.batch_size)
+            # vmap the sampling function
+            # Pass alpha and key with axis 0 matching batch dim
+            action = vmap(sampling_fn)(q_pi=q_pi, alpha=alpha_arg, rng_key=keys)
+        else: # Batch size == 1 or input q_pi was unbatched
+            # Squeeze inputs if they have a singleton batch dim
+            q_pi_unbatched = q_pi.squeeze(0) if is_single_batch_dim else q_pi
+            alpha_unbatched = alpha_arg.squeeze(0) if alpha_arg.ndim > 0 else alpha_arg
+            # Call the sampling function directly (no vmap)
+            action = sampling_fn(q_pi=q_pi_unbatched, alpha=alpha_unbatched, rng_key=rng_key)
+            # Add batch dimension back to output if needed for consistency downstream?
+            # For now, return unbatched action if input was unbatched/squeezed.
+            # If downstream expects (1, n_control), uncomment below:
+            # action = jnp.expand_dims(action, axis=0)
+        # ****** END CORRECTION ******
 
         return action
+
     
     def decode_multi_actions(self, action):
         """Decode flattened actions to multiple actions"""

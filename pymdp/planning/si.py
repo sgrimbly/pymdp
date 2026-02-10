@@ -1,17 +1,15 @@
 import itertools
-import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from jax import nn
 from jax import vmap
 
 import pymdp
-from pymdp.jax.control import (
+from pymdp.control import (
     compute_info_gain,
     compute_expected_utility,
     compute_expected_state,
     compute_expected_obs,
-    calc_inductive_value_t,
 )
 
 
@@ -56,28 +54,126 @@ class Tree:
         return node["parent"]
 
     def leaves(self):
-        return [node for node in self.nodes if "qs" in node.keys() and len(node["children"]) == 0]
+        return [
+            node
+            for node in self.nodes
+            if "qs" in node.keys() and len(node["children"]) == 0
+        ]
 
     def append(self, node):
         self.nodes.append(node)
 
 
+# def step(agent, qs, policies):
+#     def _step(a, b, c, q, policy):
+#         qs = compute_expected_state(q, b, policy, agent.B_dependencies)
+#         qo = compute_expected_obs(qs, a, agent.A_dependencies)
+#         u = compute_expected_utility(qo, c)
+#         ig = compute_info_gain(qs, qo, a, agent.A_dependencies)
+#         return qs, qo, u, ig
+
+#     qs, qo, u, ig = vmap(
+#         lambda policy: vmap(_step)(agent.A, agent.B, agent.C, qs, policy)
+#     )(policies)
+#     G = u + ig
+#     return qs, qo, G
 def step(agent, qs, policies):
-    def _step(a, b, c, q, policy):
-        qs = compute_expected_state(q, b, policy, agent.B_dependencies)
-        qo = compute_expected_obs(qs, a, agent.A_dependencies)
-        u = compute_expected_utility(qo, c)
-        ig = compute_info_gain(qs, qo, a, agent.A_dependencies)
-        return qs, qo, u, ig
+    """
+    Calculates expected states, obs, utility, and info gain for one step ahead.
+    Corrected call to compute_expected_utility.
+    """
+    # _step calculates for single policy and potentially single batch element
+    def _step(a, b, c, q, policy_step_vector):
+        # policy_step_vector assumed shape (num_control_factors,)
+        # q assumed shape List[(batch?, num_states)]
+        # a, b, c assumed shape List[(batch?, ...)]
+        qs_next = compute_expected_state(q, b, policy_step_vector, agent.B_dependencies)
+        qo_next = compute_expected_obs(qs_next, a, agent.A_dependencies)
 
-    qs, qo, u, ig = vmap(lambda policy: vmap(_step)(agent.A, agent.B, agent.C, qs, policy))(policies)
-    G = u + ig
-    return qs, qo, G
+        utility = 0.0
+        if agent.use_utility:
+             # ****** CORRECTED ARGUMENT ORDER ******
+             # Call should be compute_expected_utility(qo, C, t)
+             utility = compute_expected_utility(qo_next, c, t=0) # Pass qo_next first, then c, then t
+             # ****** END CORRECTION ******
+
+        info_gain = 0.0
+        if agent.use_states_info_gain:
+             info_gain = compute_info_gain(qs_next, qo_next, a, agent.A_dependencies)
+
+        # Return values per batch element
+        return qs_next, qo_next, utility, info_gain
+
+    # policies shape (num_policies, policy_len, num_control_factors)
+    first_actions = policies[:, 0, :] # Shape (num_policies, num_control_factors)
+
+    # Nested vmap structure (as corrected previously)
+    vmapped_step_over_batch = vmap(_step, in_axes=(0, 0, 0, 0, None))
+    vmapped_over_policies = vmap(lambda policy_action: vmapped_step_over_batch(agent.A, agent.B, agent.C, qs, policy_action),
+                                 in_axes=(0)
+                                )
+    qs_pi_all, qo_pi_all, u_all, ig_all = vmapped_over_policies(first_actions)
+
+    # Calculate G
+    G_all = u_all + ig_all # Shape (P, b)
+
+    # Return values batched over Policy (P) and Agent Batch (b)
+    return qs_pi_all, qo_pi_all, G_all
 
 
+# def tree_search(
+#     agent,
+#     qs,
+#     horizon,
+#     policy_prune_threshold=1 / 16,
+#     policy_prune_topk=-1,
+#     observation_prune_threshold=1 / 16,
+#     entropy_prune_threshold=0.5,
+#     prune_penalty=512,
+#     gamma=1,
+#     step_fn=step,
+# ):
+#     root_node = {
+#         "qs": jtu.tree_map(lambda x: x[:, -1, ...], qs),
+#         "G_t": 0.0,
+#         "parent": None,
+#         "children": [],
+#         "n": 0,
+#     }
+#     tree = Tree(root_node)
+
+#     for _ in range(horizon):
+#         leaves = tree.leaves()
+#         qs_leaves = stack_leaves([leaf["qs"] for leaf in leaves])
+#         qs_pi, qo_pi, G = vmap(lambda leaf: step_fn(agent, leaf, agent.policies))(
+#             qs_leaves
+#         )
+#         q_pi = nn.softmax(G * gamma, axis=1)
+
+#         for l, node in enumerate(leaves):
+#             tree = expand_node(
+#                 agent,
+#                 node,
+#                 tree,
+#                 jtu.tree_map(lambda x: x[l, ...], qs_pi),
+#                 jtu.tree_map(lambda x: x[l, ...], qo_pi),
+#                 q_pi[l],
+#                 G[l],
+#                 policy_prune_threshold,
+#                 policy_prune_topk,
+#                 observation_prune_threshold,
+#                 prune_penalty,
+#                 gamma,
+#             )
+
+#         if policy_entropy(tree.root()) < entropy_prune_threshold:
+#             break
+
+#     return tree
+# --- Revised tree_search loop (showing how G_leaves/q_pi_leaves are used) ---
 def tree_search(
     agent,
-    qs,
+    qs, # Shape List[(b, s)]
     horizon,
     policy_prune_threshold=1 / 16,
     policy_prune_topk=-1,
@@ -85,32 +181,58 @@ def tree_search(
     entropy_prune_threshold=0.5,
     prune_penalty=512,
     gamma=1,
-    step_fn=step,
+    step_fn=step, # Use the modified step function
 ):
     root_node = {
-        "qs": jtu.tree_map(lambda x: x[:, -1, ...], qs),
+        "qs": qs, # Keep initial batched belief List[(b, s)]
         "G_t": 0.0,
+        "G": jnp.zeros(agent.batch_size), # G at root should be batched
+        "q_pi": None, # Policy posterior at root, shape (b, P)?
         "parent": None,
         "children": [],
         "n": 0,
     }
     tree = Tree(root_node)
 
-    for _ in range(horizon):
+    for depth in range(horizon):
         leaves = tree.leaves()
-        qs_leaves = stack_leaves([leaf["qs"] for leaf in leaves])
-        qs_pi, qo_pi, G = vmap(lambda leaf: step_fn(agent, leaf, agent.policies))(qs_leaves)
-        q_pi = nn.softmax(G * gamma, axis=1)
+        if not leaves: break
 
+        # Stack leaves beliefs. Each leaf["qs"] is List[(b, s)]
+        # stacked_qs_leaves is List[(L, b, s)]
+        stacked_qs_leaves = stack_leaves([leaf["qs"] for leaf in leaves])
+
+        # vmap step_fn over the stacked leaf beliefs (map over L dim)
+        # step_fn input qs shape List[(b, s)]
+        # step_fn output shapes: qs_pi List[(P, b, s)], qo_pi List[(P, b, o)], G (P, b)
+        # vmap output shapes: qs_pi_leaves List[(L, P, b, s)], qo_pi_leaves List[(L, P, b, o)], G_leaves (L, P, b)
+        qs_pi_leaves, qo_pi_leaves, G_leaves = vmap(
+            lambda leaf_qs: step_fn(agent, leaf_qs, agent.policies),
+            in_axes=(0) # Map over L dim of stacked_qs_leaves
+            )(stacked_qs_leaves)
+
+        # Calculate policy posterior for each leaf, for each batch element
+        # Softmax over policies axis P (axis=1)
+        # Input G_leaves shape (L, P, b) -> Output q_pi_leaves shape (L, P, b)
+        q_pi_leaves = nn.softmax(G_leaves * gamma, axis=1)
+
+        # Expand each leaf node based on calculated EFE
         for l, node in enumerate(leaves):
-            tree = expand_node(
+            # Slice results for the current leaf `l`
+            # Output shapes: qs_pi (P, b, s), qo_pi (P, b, o), q_pi (P, b), G (P, b)
+            qs_pi_leaf = jtu.tree_map(lambda x: x[l, ...], qs_pi_leaves)
+            qo_pi_leaf = jtu.tree_map(lambda x: x[l, ...], qo_pi_leaves)
+            q_pi_leaf = q_pi_leaves[l, ...]
+            G_leaf = G_leaves[l, ...]
+
+            tree = expand_node( # expand_node needs to handle batched q_pi, G inputs
                 agent,
                 node,
                 tree,
-                jtu.tree_map(lambda x: x[l, ...], qs_pi),
-                jtu.tree_map(lambda x: x[l, ...], qo_pi),
-                q_pi[l],
-                G[l],
+                qs_pi_leaf,
+                qo_pi_leaf,
+                q_pi_leaf, # Shape (P, b)
+                G_leaf,    # Shape (P, b)
                 policy_prune_threshold,
                 policy_prune_topk,
                 observation_prune_threshold,
@@ -118,8 +240,11 @@ def tree_search(
                 gamma,
             )
 
-        if policy_entropy(tree.root()) < entropy_prune_threshold:
-            break
+        # Optional: Check for early stopping - policy_entropy needs adjustment for batched root q_pi
+        # root_policy_entropy = policy_entropy(tree.root()) # tree.root()["q_pi"] shape (b,P)?
+        # if root_policy_entropy is not None and root_policy_entropy < entropy_prune_threshold:
+        #     print(f"Stopping early at depth {depth+1} due to low policy entropy: {root_policy_entropy:.3f}")
+        #     break
 
     return tree
 
@@ -263,7 +388,7 @@ def tree_backward(node, prune_penalty=512, gamma=1):
 
 
 def policy_entropy(node):
-    return -jnp.dot(node["q_pi"], jnp.log(node["q_pi"] + pymdp.maths.EPS_VAL))
+    return -jnp.dot(node["q_pi"], jnp.log(node["q_pi"] + 1e-16))
 
 
 def stack_leaves(data):
