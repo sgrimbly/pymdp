@@ -5,8 +5,10 @@
 """Policy construction, expected free energy, and action sampling utilities."""
 
 import itertools
+import functools
 import jax.numpy as jnp
 import jax.tree_util as jtu
+import numpy as np
 from typing import Sequence
 from functools import partial
 from jax import lax, vmap, nn
@@ -18,23 +20,76 @@ import equinox as eqx
 from pymdp.maths import factor_dot, log_stable, stable_entropy, stable_xlogx, spm_wnorm
 from pymdp import utils
 
-class Policies(eqx.Module):
-    """ 
-    A class for storing an array of policies and its properties
-    
+
+@functools.lru_cache(maxsize=64)
+def _materialise_policy_arr(policy_tup: tuple) -> Array:
+    """Memoised conversion: nested-tuple-of-ints -> int32 ``jnp.ndarray``.
+
+    Cached so multiple ``Policies.policy_arr`` accesses with the same
+    underlying static tuple share the materialised array instead of
+    rebuilding it. Cache key is the tuple itself (hashable by value)
+    so equal-content ``Policies`` instances also share. The 64-entry
+    bound caps memory if many distinct policy libraries are used in
+    one process; a single sweep typically uses 1-3.
     """
-    policy_arr: Array
+    return jnp.asarray(policy_tup, dtype=jnp.int32)
+
+
+class Policies(eqx.Module):
+    """A class for storing an array of policies and its properties.
+
+    The underlying policy table is stored as a hashable nested tuple
+    in the static partition (``_policy_tup``). equinox sees a
+    value-hashable Python tuple rather than the buffer-identity-based
+    "JAX array as static" pattern that triggered upstream issue #346.
+    The ``policy_arr`` property materialises the JAX array at access
+    time; inside JIT it is folded as a compile-time constant. Outside
+    JIT it is memoised by the underlying tuple so repeated property
+    access does not rebuild the array.
+
+    See [downstream] ``docs/architecture/pymdp_static_array_fork_fix.md``
+    for the full diagnostic timeline (pre-fix mmap leak, the routing
+    workaround for the leak, and the per-call recompile cost #346
+    flagged that motivated the option-3 redesign here).
+    """
+    _policy_tup: tuple = eqx.field(static=True)  # tuple[tuple[tuple[int, ...]]] of shape (num_policies, horizon, num_factors)
     horizon: int = eqx.field(static=True)
     num_policies: int = eqx.field(static=True)
 
-    def __init__(self, policy_arr: Array) -> None:
-        self.num_policies = policy_arr.shape[0]
-        self.horizon = policy_arr.shape[1]
-        self.policy_arr = policy_arr
-    
+    def __init__(self, policy_arr) -> None:
+        # Accept either a JAX/NumPy array (existing API surface) or a
+        # pre-built nested tuple (used by equinox's pytree-flatten
+        # round-trip). The tuple form is the canonical static
+        # representation; the array form is converted on entry.
+        if hasattr(policy_arr, "shape"):
+            arr_np = np.asarray(policy_arr)
+            self.num_policies = int(arr_np.shape[0])
+            self.horizon = int(arr_np.shape[1])
+            self._policy_tup = tuple(
+                tuple(tuple(int(x) for x in arr_np[p, h]) for h in range(self.horizon))
+                for p in range(self.num_policies)
+            )
+        else:
+            # Already a nested tuple, e.g. from pytree-flatten.
+            self._policy_tup = tuple(policy_arr)
+            self.num_policies = len(self._policy_tup)
+            self.horizon = len(self._policy_tup[0]) if self.num_policies > 0 else 0
+
+    @property
+    def policy_arr(self) -> Array:
+        """Materialise the policy table as a JAX array.
+
+        Inside a JIT trace, ``jnp.asarray`` over a Python tuple of ints
+        is folded into the HLO as a compile-time constant. Outside JIT,
+        the result is memoised in :func:`_materialise_policy_arr` so
+        repeated property access (e.g. multiple downstream call sites
+        in :mod:`pymdp.agent`) shares one materialisation.
+        """
+        return _materialise_policy_arr(self._policy_tup)
+
     def __getitem__(self, idx: int) -> Array:
         return self.policy_arr[idx]
-    
+
     def __len__(self) -> int:
         return self.num_policies
     
