@@ -67,8 +67,34 @@ class Agent(Module):
     gamma: Array
     alpha: Array
 
-    # matrix of all possible policies (each row is a policy of shape (num_controls[0], num_controls[1], ..., num_controls[num_control_factors-1])
-    policies: control.Policies = field(static=True)
+    # matrix of all possible policies (each row is a policy of shape
+    # (num_controls[0], num_controls[1], ..., num_controls[num_control_factors-1]))
+    #
+    # LOCAL PATCH (2026-05-01, downstream Hierarchical_AttentionAgent):
+    # `static=True` was removed. Equinox prints a runtime warning at
+    # Agent construction — "A JAX array is being set as static! This
+    # can result in unexpected behavior and is usually a mistake to
+    # do." — because `Policies` carries a `policy_arr: Array` leaf.
+    # Tree-attribute updates such as ``eqx.tree_at(lambda a: a.A, ...)``
+    # then rebuild the static partition around a fresh array buffer,
+    # which (a) emits the warning, and (b) — measured downstream —
+    # contributes per-call host overhead at production HLO sizes
+    # (horizon=3, policy_mode=full, ~625-policy library) because
+    # equinox's static-partition equality is buffer-identity-based
+    # while every fresh trace-prep produces a new buffer.
+    #
+    # Dropping `static=True` puts `policy_arr` in the traced partition,
+    # where JAX caches by shape/dtype rather than by Python hash. The
+    # inner `Policies` class still pins `horizon` and `num_policies` as
+    # static fields, so trace-time constancy is preserved. JIT cache
+    # hits remain correct; pickling/serialisation are equinox-pytree-
+    # aware and unaffected. See the downstream analysis at
+    # `docs/architecture/pymdp_static_array_fork_fix.md` in the
+    # Hierarchical_AttentionAgent repo for the full diagnostic
+    # timeline (mmap leak at trial ~7, the routing-level workaround,
+    # and the empirical evidence that `tree_at` + `static=True` is the
+    # cliff). This patch is the single-line *root-cause* fix.
+    policies: control.Policies
 
     # threshold for inductive inference (the threshold for pruning transitions that are below a certain probability)
     inductive_threshold: Array
