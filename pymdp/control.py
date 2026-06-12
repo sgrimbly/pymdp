@@ -264,8 +264,13 @@ def update_posterior_policies(
     use_utility: bool = True,
     use_states_info_gain: bool = True,
     use_param_info_gain: bool = False,
+    param_info_gain_weight: float = 1.0,
+    functional: str = "efe",
 ) -> tuple[Array, Array]:
     """Compute posterior over policies and policy-wise negative expected free energy.
+
+    See :func:`compute_neg_efe_policy` for the `functional` argument
+    (``"efe"`` | ``"feef"`` | ``"fef"``).
 
     Notes
     -----
@@ -314,6 +319,8 @@ def update_posterior_policies(
         raise ValueError(
             "use_param_info_gain=True requires at least one of pA or pB."
         )
+    if functional not in ("efe", "feef", "fef"):
+        raise ValueError(f"unknown planning functional {functional!r}; expected 'efe', 'feef' or 'fef'")
 
     # policy --> n_levels_factor_f x 1
     # factor --> n_levels_factor_f x n_policies
@@ -331,6 +338,8 @@ def update_posterior_policies(
         use_utility=use_utility,
         use_states_info_gain=use_states_info_gain,
         use_param_info_gain=use_param_info_gain,
+        param_info_gain_weight=param_info_gain_weight,
+        functional=functional,
     )
 
     # only in the case of policy-dependent qs_inits
@@ -474,6 +483,41 @@ def compute_info_gain(
         
     return jtu.tree_reduce(lambda x,y: x+y, info_gains_per_modality)
 
+def compute_expected_ambiguity(
+    qs: list[Array], A: list[Array], A_dependencies: list[list[int]]
+) -> Array:
+    """Compute expected ambiguity: the belief-weighted conditional observation entropy
+    ``sum_m E_{Q(s)}[ H[A_m(. | s)] ]``.
+
+    This is the term by which the EFE and the FEEF extrinsic values differ
+    (Millidge, Tschantz & Buckley 2021): the FEEF extrinsic term
+    ``E_{Q(s)} KL[Q(o|s) || C]`` expands to ``-(expected utility + expected ambiguity)``
+    while the epistemic (information-gain) term is identical between the two functionals.
+
+    Parameters
+    ----------
+    qs: list[Array]
+        Predicted hidden-state beliefs.
+    A: list[Array]
+        Observation likelihood tensors.
+    A_dependencies: list[list[int]]
+        Observation dependencies between modalities and hidden-state factors.
+
+    Returns
+    -------
+    Array
+        Scalar expected ambiguity, summed over modalities.
+    """
+
+    def ambiguity_for_modality(A_m: Array, m: int) -> Array:
+        H_A_m = - stable_xlogx(A_m).sum(0)
+        deps = A_dependencies[m]
+        relevant_factors = [qs[idx] for idx in deps]
+        return factor_dot(H_A_m, relevant_factors)
+
+    per_modality = jtu.tree_map(ambiguity_for_modality, A, list(range(len(A))))
+    return jtu.tree_reduce(lambda x, y: x + y, per_modality)
+
 def compute_expected_utility(qo: list[Array], C: list[Array], t: int = 0) -> Array:
     """Compute expected utility from predictive observations and preferences.
 
@@ -608,6 +652,8 @@ def compute_neg_efe_policy(
     use_utility: bool = True,
     use_states_info_gain: bool = True,
     use_param_info_gain: bool = False,
+    param_info_gain_weight: float = 1.0,
+    functional: str = "efe",
 ) -> Array:
     """Compute policy-wise negative expected free energy for one policy.
 
@@ -615,6 +661,19 @@ def compute_neg_efe_policy(
     -----
     This function computes `neg_efe = -EFE` for a single policy. This policy
     score (`neg_efe`) is commonly denoted `G`.
+
+    The `functional` argument selects the planning functional being scored
+    (all returned as negative scores, so higher = better):
+
+    - ``"efe"`` (default): ``utility + state info gain (+ param info gain)`` --
+      the standard expected free energy.
+    - ``"feef"``: free energy of the expected future (Millidge, Tschantz &
+      Buckley 2021). Extrinsic term is ``-E_Q(s) KL[Q(o|s)||C] = utility +
+      expected ambiguity``; the information-gain terms are IDENTICAL to the
+      EFE's.
+    - ``"fef"``: free energy of the future (same paper) -- the EFE extrinsic
+      term with the information-gain terms RE-SIGNED ("minimizing the FEF
+      mandates us to minimize information gain"): an info-AVOIDING functional.
 
     Parameters
     ----------
@@ -673,7 +732,15 @@ def compute_neg_efe_policy(
         if pB is not None:
             neg_param_info_gain += calc_negative_pB_info_gain(pB, qs_next, qs, B_dependencies, policy_i[t]) if use_param_info_gain else 0.
 
-        neg_efe += info_gain + utility - neg_param_info_gain
+        # planning-functional variants; `functional` is static so this branch
+        # resolves at trace time (see docstring).
+        if functional == "feef":
+            utility = utility + (compute_expected_ambiguity(qs_next, A, A_dependencies) if use_utility else 0.)
+        elif functional == "fef":
+            info_gain = -info_gain
+            neg_param_info_gain = -neg_param_info_gain
+
+        neg_efe += info_gain + utility - param_info_gain_weight * neg_param_info_gain
 
         return (qs_next, neg_efe), None
 
@@ -698,10 +765,15 @@ def compute_neg_efe_policy_inductive(
     use_utility: bool = True,
     use_states_info_gain: bool = True,
     use_param_info_gain: bool = False,
+    param_info_gain_weight: float = 1.0,
     use_inductive: bool = False,
+    functional: str = "efe",
 ) -> Array:
     """
     Compute policy-wise negative expected free energy with inductive planning.
+
+    See :func:`compute_neg_efe_policy` for the `functional` argument
+    (``"efe"`` | ``"feef"`` | ``"fef"``).
 
     Notes
     -----
@@ -776,7 +848,15 @@ def compute_neg_efe_policy_inductive(
         if pB is not None:
             neg_param_info_gain += calc_negative_pB_info_gain(pB, qs_next, qs, B_dependencies, policy_i[t]) if use_param_info_gain else 0.
 
-        neg_efe += info_gain + utility - neg_param_info_gain + inductive_value
+        # planning-functional variants; `functional` is static so this branch
+        # resolves at trace time (see compute_neg_efe_policy docstring).
+        if functional == "feef":
+            utility = utility + (compute_expected_ambiguity(qs_next, A, A_dependencies) if use_utility else 0.)
+        elif functional == "fef":
+            info_gain = -info_gain
+            neg_param_info_gain = -neg_param_info_gain
+
+        neg_efe += info_gain + utility - param_info_gain_weight * neg_param_info_gain + inductive_value
 
         return (qs_next, neg_efe), None
 
@@ -803,11 +883,16 @@ def update_posterior_policies_inductive(
     use_utility: bool = True,
     use_states_info_gain: bool = True,
     use_param_info_gain: bool = False,
+    param_info_gain_weight: float = 1.0,
     use_inductive: bool = True,
+    functional: str = "efe",
 ) -> tuple[Array, Array]:
     """
     Compute policy posterior and negative expected free energy with optional
     inductive terms.
+
+    See :func:`compute_neg_efe_policy` for the `functional` argument
+    (``"efe"`` | ``"feef"`` | ``"fef"``).
 
     Notes
     -----
@@ -864,6 +949,8 @@ def update_posterior_policies_inductive(
         raise ValueError(
             "use_param_info_gain=True requires at least one of pA or pB."
         )
+    if functional not in ("efe", "feef", "fef"):
+        raise ValueError(f"unknown planning functional {functional!r}; expected 'efe', 'feef' or 'fef'")
 
     # policy --> n_levels_factor_f x 1
     # factor --> n_levels_factor_f x n_policies
@@ -883,7 +970,9 @@ def update_posterior_policies_inductive(
         use_utility=use_utility,
         use_states_info_gain=use_states_info_gain,
         use_param_info_gain=use_param_info_gain,
+        param_info_gain_weight=param_info_gain_weight,
         use_inductive=use_inductive,
+        functional=functional,
     )
 
     # only in the case of policy-dependent qs_inits

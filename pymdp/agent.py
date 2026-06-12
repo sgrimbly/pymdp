@@ -118,6 +118,15 @@ class Agent(Module):
     use_states_info_gain: bool = field(static=True)
     # flag for whether to use parameter information gain ("novelty") when computing expected free energy
     use_param_info_gain: bool = field(static=True)
+    # weight (lambda) on the parameter-information-gain ("novelty") term in EFE; 1.0 reproduces
+    # standard pymdp (novelty enters 1:1 with utility), <1 down-weights it. Static: changing it
+    # recompiles, so treat it as an outer-loop sweep parameter.
+    param_info_gain_weight: float = field(static=True)
+    # planning functional used to score policies: "efe" (default), "feef" (free energy of the
+    # expected future -- identical epistemic term, extrinsic KL adds expected ambiguity), or
+    # "fef" (free energy of the future -- information-gain terms re-signed, info-avoiding).
+    # See pymdp.control.compute_neg_efe_policy.
+    functional: str = field(static=True)
     # flag for whether to use inductive inference ("intentional inference") when computing expected free energy
     use_inductive: bool = field(static=True)
     categorical_obs: bool = field(static=True)
@@ -163,7 +172,9 @@ class Agent(Module):
         use_utility: bool = True,
         use_states_info_gain: bool = True,
         use_param_info_gain: bool = False,
+        param_info_gain_weight: float = 1.0,
         use_inductive: bool = False,
+        functional: str = "efe",
         categorical_obs: bool = False,
         preprocess_fn: Optional[Callable] = None,
         action_selection: str = "deterministic",
@@ -299,7 +310,11 @@ class Agent(Module):
         self.use_utility = use_utility
         self.use_states_info_gain = use_states_info_gain
         self.use_param_info_gain = use_param_info_gain
+        self.param_info_gain_weight = param_info_gain_weight
         self.use_inductive = use_inductive
+        if functional not in ("efe", "feef", "fef"):
+            raise ValueError(f"unknown planning functional {functional!r}; expected 'efe', 'feef' or 'fef'")
+        self.functional = functional
 
         # learning parameters
         self.learning_mode = learning_mode
@@ -897,7 +912,9 @@ class Agent(Module):
             use_utility=self.use_utility,
             use_states_info_gain=self.use_states_info_gain,
             use_param_info_gain=self.use_param_info_gain,
-            use_inductive=self.use_inductive
+            param_info_gain_weight=self.param_info_gain_weight,
+            use_inductive=self.use_inductive,
+            functional=self.functional,
         )
 
         q_pi, neg_efe = vmap(infer_policies)(
