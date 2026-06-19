@@ -169,18 +169,37 @@ class Agent(Module):
 
         # flatten B action dims for multiple action dependencies
         self.action_maps = None
-        if (
-            policies is None and B_action_dependencies is not None
-        ):  # note, this only works when B_action_dependencies is not the trivial case of [[0], [1], ...., [num_factors-1]]
-            policies_multi = control.construct_policies(
-                self.num_controls_multi,
-                self.num_controls_multi,
-                policy_len,
-                control_fac_idx,
-            )
-            B, pB, self.action_maps = self._flatten_B_action_dims(B, pB, self.B_action_dependencies)
-            policies = self._construct_flattend_policies(policies_multi, self.action_maps)
-            self.sampling_mode = "full"
+        if B_action_dependencies is not None:
+            # The trivial case (each hidden factor controlled only by its corresponding
+            # control factor) does not need flattening. All other cases do.
+            trivial = self.B_action_dependencies == [[f] for f in range(self.num_factors)]
+            if not trivial:
+                B, pB, self.action_maps = self._flatten_B_action_dims(B, pB, self.B_action_dependencies)
+
+                if policies is None:
+                    policies_multi = control.construct_policies(
+                        self.num_controls_multi,
+                        self.num_controls_multi,
+                        policy_len,
+                        control_fac_idx,
+                    )
+                    policies = self._construct_flattend_policies(policies_multi, self.action_maps)
+                else:
+                    policies_arr = jnp.asarray(policies)
+                    if policies_arr.ndim != 3:
+                        raise ValueError(
+                            f"Expected policies with ndim=3, got shape {policies_arr.shape}"
+                        )
+                    # If the user provided multi-action policies (last dim equals the number of
+                    # control factors), flatten them to per-hidden-factor actions.
+                    if policies_arr.shape[-1] == len(self.num_controls_multi):
+                        policies = self._construct_flattend_policies(policies_arr, self.action_maps)
+                    else:
+                        # Assume already flattened (last dim == num_factors).
+                        policies = policies_arr
+
+                # Flattened action dependencies require full policy sampling.
+                self.sampling_mode = "full"
         
         # extract shapes from A and B
         self.num_states = self._get_num_states_from_B(B, self.B_dependencies)

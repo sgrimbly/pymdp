@@ -300,8 +300,11 @@ def compute_G_policy(qs_init, A, B, C, pA, pB, A_dependencies, B_dependencies, p
 
         utility = compute_expected_utility(qo, C, t) if use_utility else 0.
 
-        param_info_gain = calc_pA_info_gain(pA, qo, qs_next, A_dependencies) if use_param_info_gain else 0.
-        param_info_gain += calc_pB_info_gain(pB, qs_next, qs, B_dependencies, policy_i[t]) if use_param_info_gain else 0.
+        param_info_gain = 0.
+        if use_param_info_gain and (pA is not None):
+            param_info_gain += calc_pA_info_gain(pA, qo, qs_next, A_dependencies)
+        if use_param_info_gain and (pB is not None):
+            param_info_gain += calc_pB_info_gain(pB, qs_next, qs, B_dependencies, policy_i[t])
 
         neg_G += info_gain + utility + param_info_gain
 

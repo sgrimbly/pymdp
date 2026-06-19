@@ -125,12 +125,15 @@ def index_to_combination(index, dims):
     x: ``numpy.ndarray`` or ``jax.Array`` of shape `(batch_size, act_dims)`
         ``numpy.ndarray`` or ``jax.Array`` of categorical values to be converted into combination index
     """
+    use_numpy = isinstance(index, np.ndarray)
     x = []
     for base in reversed(dims):
         x.append(index % base)
         index = index // base
 
-    x = np.flip(np.stack(x, axis=-1), axis=-1)
+    stack = np.stack if use_numpy else jnp.stack
+    flip = np.flip if use_numpy else jnp.flip
+    x = flip(stack(x, axis=-1), axis=-1)
     return x
 
 

@@ -11,9 +11,12 @@ from typing import List
 def add(x, y):
     return x + y
 
-def marginal_log_likelihood(qs, log_likelihood, i):
-    xs = [q for j, q in enumerate(qs) if j != i]
-    return factor_dot(log_likelihood, xs, keep_dims=(i,))
+def marginal_log_likelihood(log_likelihood, xs, i):
+    
+    factors_to_sum_out = tuple([x for idx, x in enumerate(xs) if idx != i])
+    dims_to_sum_out = tuple([(idx,) for idx, _ in enumerate(xs) if idx != i])
+    
+    return factor_dot_flex(log_likelihood, factors_to_sum_out, dims=dims_to_sum_out, keep_dims=(i,))
 
 def all_marginal_log_likelihood(qs, log_likelihoods, all_factor_lists):
     qL_marginals = jtu.tree_map(lambda ll_m, factor_list_m: mll_factors(qs, ll_m, factor_list_m), log_likelihoods, all_factor_lists)
@@ -31,7 +34,7 @@ def all_marginal_log_likelihood(qs, log_likelihoods, all_factor_lists):
 
 def mll_factors(qs, ll_m, factor_list_m) -> List:
     relevant_factors = [qs[f] for f in factor_list_m]
-    marginal_ll_f = jtu.Partial(marginal_log_likelihood, relevant_factors, ll_m)
+    marginal_ll_f = jtu.Partial(marginal_log_likelihood, ll_m, relevant_factors)
     loc_nf = len(factor_list_m)
     loc_factors = list(range(loc_nf))
     return jtu.tree_map(marginal_ll_f, loc_factors)
@@ -53,7 +56,7 @@ def run_vanilla_fpi(A, obs, prior, num_iter=1, distr_obs=True):
     def scan_fn(carry, t):
         log_q = carry
         q = jtu.tree_map(nn.softmax, log_q)
-        mll = jtu.Partial(marginal_log_likelihood, q, ll)
+        mll = jtu.Partial(marginal_log_likelihood, ll, q)
         marginal_ll = jtu.tree_map(mll, factors)
         log_q = jtu.tree_map(add, marginal_ll, log_prior)
 
@@ -69,7 +72,7 @@ def run_factorized_fpi(A, obs, prior, A_dependencies, num_iter=1):
     """
     Run the fixed point iteration algorithm with sparse dependencies between factors and outcomes (stored in `A_dependencies`)
     """
-
+    # print(f"run_factorized_fpi: obs shapes: {[o.shape for o in obs]}")
     # Step 1: Compute log likelihoods for each factor
     log_likelihoods = compute_log_likelihood_per_modality(obs, A)
 
