@@ -204,7 +204,17 @@ def _run_sequence_inference(
     num_iter: int,
     distr_obs: bool,
     valid_steps: int | Array | None,
-) -> tuple[list[Array], Array | None, Array | None]:
+    return_iterations: bool = False,
+    tau: float = 1.0,
+) -> tuple:
+    """Windowed (sequence) state inference for MMP/VMP.
+
+    When ``return_iterations`` is ``True`` (a static flag used only by the
+    ERP/trace entry point) an extra element — the per-iteration belief
+    trajectory — is appended to the returned tuple. With it ``False`` the
+    return value is the original 3-tuple, so ``update_posterior_states`` and
+    every existing caller are unaffected.
+    """
     if B is None:
         raise ValueError(f"Sequence inference method `{method}` requires `B`.")
 
@@ -242,7 +252,7 @@ def _run_sequence_inference(
             )
 
     if method == "vmp":
-        qs = run_vmp(
+        result = run_vmp(
             A,
             conditioned_B,
             obs,
@@ -250,12 +260,14 @@ def _run_sequence_inference(
             A_dependencies,
             B_dependencies,
             num_iter=num_iter,
+            tau=tau,
             distr_obs=distr_obs,
             obs_valid_mask=obs_valid_mask,
             transition_valid_mask=transition_valid_mask,
+            return_iterations=return_iterations,
         )
     else:
-        qs = run_mmp(
+        result = run_mmp(
             A,
             conditioned_B,
             obs,
@@ -263,12 +275,77 @@ def _run_sequence_inference(
             A_dependencies,
             B_dependencies,
             num_iter=num_iter,
+            tau=tau,
             distr_obs=distr_obs,
             obs_valid_mask=obs_valid_mask,
             transition_valid_mask=transition_valid_mask,
+            return_iterations=return_iterations,
         )
 
-    return qs, obs_valid_mask, transition_valid_mask
+    if return_iterations:
+        qs, iterations = result
+        return qs, obs_valid_mask, transition_valid_mask, iterations
+
+    return result, obs_valid_mask, transition_valid_mask
+
+
+def infer_states_sequence_trace(
+    A: list[Array],
+    B: list[Array] | None,
+    obs: list[Array],
+    past_actions: Array | None,
+    prior: list[Array],
+    *,
+    A_dependencies: list[list[int]] | None = None,
+    B_dependencies: list[list[int]] | None = None,
+    num_iter: int = 16,
+    method: str = "mmp",
+    distr_obs: bool = True,
+    inference_horizon: int | None = None,
+    valid_steps: int | Array | None = None,
+    tau: float = 0.25,
+) -> tuple[list[Array], list[Array]]:
+    """Sequence (MMP/VMP) state inference that also returns the per-iteration
+    belief trajectory — the analogue of SPM's ``xn`` field, used to simulate
+    ERPs from variational belief updating.
+
+    This is a standalone, opt-in analysis entry point: it reuses the same
+    windowing and message passing as :func:`update_posterior_states` but with
+    the trajectory-returning scan enabled. It deliberately does **not** touch
+    ``update_posterior_states`` / ``Agent.infer_states`` or their compiled
+    graphs, so the JIT/vmap behaviour of the standard inference and planning
+    paths is unchanged.
+
+    Returns
+    -------
+    qs : list[Array]
+        Final sequence posterior beliefs per factor, shape ``(T, num_states_f)``.
+    iterations : list[Array]
+        Per-iteration belief trajectory per factor, shape
+        ``(num_iter, T, num_states_f)`` (SPM ``xn``). The ERP for a factor is
+        typically the iteration-wise rate of change of these expectations.
+    """
+    if method not in SEQUENCE_METHODS:
+        raise ValueError(
+            f"Trajectory capture requires a sequence method ('mmp'/'vmp'), got {method!r}."
+        )
+    obs, past_actions = _truncate_for_horizon(obs, past_actions, inference_horizon)
+    qs, _obs_mask, _trans_mask, iterations = _run_sequence_inference(
+        A,
+        B,
+        obs,
+        past_actions,
+        prior,
+        A_dependencies,
+        B_dependencies,
+        method=method,
+        num_iter=num_iter,
+        distr_obs=distr_obs,
+        valid_steps=valid_steps,
+        return_iterations=True,
+        tau=tau,
+    )
+    return qs, iterations
 
 
 def _update_qs_history(

@@ -151,8 +151,20 @@ def update_marginals(
     distr_obs: bool = True,
     obs_valid_mask: Array | None = None,
     transition_valid_mask: Array | None = None,
-) -> list[Array]:
-    """ Version of marginal update that uses a sparse dependency matrix for A """
+    return_iterations: bool = False,
+) -> list[Array] | tuple[list[Array], list[Array]]:
+    """ Version of marginal update that uses a sparse dependency matrix for A
+
+    Parameters
+    ----------
+    return_iterations : bool, default=False
+        If ``True``, additionally return the per-iteration belief trajectory
+        (one array of shape ``(num_iter, T, num_states_f)`` per factor) — the
+        analogue of SPM's ``xn`` field, used to simulate ERPs. This is a static
+        (trace-time) flag: when ``False`` the traced computation, return value
+        and compiled graph are identical to the original, so existing callers
+        and their JIT/vmap behaviour are unaffected.
+    """
 
     T = obs[0].shape[0]
     ln_B = None if B is None else jtu.tree_map(log_stable, B)
@@ -203,10 +215,15 @@ def update_marginals(
 
         qs = jtu.tree_map(mgds, ln_As, lnB_past, lnB_future, ln_qs)
 
-        return qs, None
+        # `return_iterations` is a static Python bool, so this conditional is
+        # resolved at trace time: with it False the scan stacks `None` exactly
+        # as before (no extra memory, identical compiled graph).
+        return qs, (qs if return_iterations else None)
 
-    qs, _ = lax.scan(scan_fn, qs, jnp.arange(num_iter))
+    qs, iterations = lax.scan(scan_fn, qs, jnp.arange(num_iter))
 
+    if return_iterations:
+        return qs, iterations
     return qs
 
 def variational_filtering_step(
@@ -372,19 +389,21 @@ def run_vmp(
     distr_obs: bool = True,
     obs_valid_mask: Array | None = None,
     transition_valid_mask: Array | None = None,
-) -> list[Array]:
+    return_iterations: bool = False,
+) -> list[Array] | tuple[list[Array], list[Array]]:
     """Run variational message passing over a sequence window.
 
-    Parameters are identical to :func:`run_mmp`.
+    Parameters are identical to :func:`run_mmp` (including ``return_iterations``).
 
     Returns
     -------
     list[Array]
         Sequence posterior beliefs per hidden-state factor (same structure as
-        :func:`run_mmp`).
+        :func:`run_mmp`). If ``return_iterations`` is ``True``, also returns the
+        per-iteration belief trajectory.
     """
 
-    qs = update_marginals(
+    return update_marginals(
         get_vmp_messages,
         obs,
         A,
@@ -397,8 +416,8 @@ def run_vmp(
         distr_obs=distr_obs,
         obs_valid_mask=obs_valid_mask,
         transition_valid_mask=transition_valid_mask,
+        return_iterations=return_iterations,
     )
-    return qs
 
 def get_mmp_messages(
     ln_B: list[Array] | None,
@@ -492,7 +511,8 @@ def run_mmp(
     distr_obs: bool = True,
     obs_valid_mask: Array | None = None,
     transition_valid_mask: Array | None = None,
-) -> list[Array]:
+    return_iterations: bool = False,
+) -> list[Array] | tuple[list[Array], list[Array]]:
     """Run marginal message passing over a sequence window.
 
     Parameters
@@ -525,7 +545,7 @@ def run_mmp(
     list[Array]
         Sequence posterior beliefs per hidden-state factor.
     """
-    qs = update_marginals(
+    return update_marginals(
         get_mmp_messages,
         obs,
         A,
@@ -538,8 +558,8 @@ def run_mmp(
         distr_obs=distr_obs,
         obs_valid_mask=obs_valid_mask,
         transition_valid_mask=transition_valid_mask,
+        return_iterations=return_iterations,
     )
-    return qs
 
 def run_online_filtering(
     A: list[Array],

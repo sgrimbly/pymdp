@@ -21,3 +21,10 @@ build/
 dist/
 uv.lock
 docs-mkdocs/tutorials/notebooks/examples/**/*.ipynb
+
+# graphify knowledge-graph cache
+graphify-out/
+
+# Claude Code tooling config
+.claude/
+CLAUDE.md
